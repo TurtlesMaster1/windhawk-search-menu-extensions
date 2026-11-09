@@ -11,13 +11,16 @@ first; this file covers how to work on it safely.
   demo, lifetime), then run `./build.sh` (Git Bash). `//@@ABI@@` in `body.cpp` is replaced by
   `src/pal_abi_min.h`.
 - `./build.sh` builds three things into `out/`: `mod.dll` (real Windhawk flags, proves the mod
-  compiles), the standalone test DLL `wse-test.dll` (the mod source with `src/test_shim.h` prepended and `src/test_main.cpp` appended, so the published mod never needs `WH_MOD` checks or Windhawk-symbol redefinitions, which the windhawk-mods validator flags), and
-  `inject.exe`. `./build.sh test` skips `mod.dll`. If the test DLL is locked because it's loaded
+  compiles), the standalone test DLL `wse-test.dll`, and `inject.exe`.
+  The test DLL is the mod source with `src/test_shim.h` prepended and `src/test_main.cpp`
+  appended. Keep all test-only code in those two files: the windhawk-mods validator flags
+  `WH_MOD` checks and `#define Wh_...` redefinitions in the published mod. `./build.sh test` skips `mod.dll`. If the test DLL is locked because it's loaded
   in the composer, use `TESTDLL=wse-test2.dll ./build.sh test`.
 - The compiler is Windhawk's bundled clang (`C:\Program Files\Windhawk\Compiler`). Keep the code
-  compiling with `-std=c++23` under llvm-mingw. No MSVC-only constructs, no WRL/C++/WinRT
-  headers: the WinRT ABI is hand-written in `pal_abi_min.h` (regenerate with `src/gen_abi.py`
-  from `winmdidl` output of `C:\Windows\System32\WinMetadata\Windows.UI.winmd`).
+  compiling with `-std=c++23` under llvm-mingw. No MSVC-only constructs. The C++/WinRT headers
+  Windhawk ships are fine (the code uses `winrt/Windows.Data.Json.h`), but there's no projection
+  for `Windows.UI.Palettes`, so its ABI is hand-written in `pal_abi_min.h` (regenerate with
+  `src/gen_abi.py` from `winmdidl` output of `C:\Windows\System32\WinMetadata\Windows.UI.winmd`).
 - Keep the public C API (`WSE_*`, `WSE_ProviderCallbacks`) and the pipe protocol
   backward-compatible. Add fields at the end of structs and gate them on `cbSize`. Bump
   `WSE_GetApiVersion` only for additive changes, and document them in the readme in `head.cpp`.
