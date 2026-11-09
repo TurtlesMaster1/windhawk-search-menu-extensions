@@ -432,7 +432,6 @@ static bool LibInit() {
     }).detach();
     if (g_settings.pipeServer) StartPipe();
     LOG(L"Search Menu Extensions running (pid %lu)", GetCurrentProcessId());
-#ifdef WH_MOD
     // Enabled while search was already running: Windows has read its provider list and won't
     // re-read it, so restart the composer (it relaunches the next time search opens, with us in it).
     if (lateLoad && g_settings.restartIfLate) {
@@ -449,7 +448,6 @@ static bool LibInit() {
             }
         }).detach();
     }
-#endif
     return true;
 }
 
@@ -467,7 +465,6 @@ static void LibUninit() {
     LOG(L"Search Menu Extensions stopped");
 }
 
-#ifdef WH_MOD
 BOOL Wh_ModInit() {
     LOG(L"Init");
     return LibInit();
@@ -483,17 +480,3 @@ void Wh_ModSettingsChanged() {
         g_demo = 0;
     }
 }
-#else
-extern "C" __declspec(dllexport) DWORD WINAPI TestInit(void*) {
-    LibInit();
-    return 0;
-}
-extern "C" __declspec(dllexport) DWORD WINAPI TestUninit(void*) {
-    LibUninit();
-    return 0;
-}
-BOOL WINAPI DllMain(HINSTANCE h, DWORD r, void*) {
-    if (r == DLL_PROCESS_ATTACH) g_module = h;
-    return TRUE;
-}
-#endif

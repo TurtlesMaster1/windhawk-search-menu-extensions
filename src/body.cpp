@@ -19,37 +19,6 @@
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Data.Json.h>
 
-#ifndef WH_MOD
-// ---------------------------------------------------------------------------
-// Standalone test build (injected DLL, no Windhawk engine).
-// ---------------------------------------------------------------------------
-#include <stdio.h>
-#include <stdarg.h>
-static void TestLog(const wchar_t* fmt, ...) {
-    wchar_t buf[4096];
-    va_list ap;
-    va_start(ap, fmt);
-    _vsnwprintf(buf, 4095, fmt, ap);
-    va_end(ap);
-    buf[4095] = 0;
-    SYSTEMTIME st;
-    GetLocalTime(&st);
-    wchar_t logPath[MAX_PATH];
-    GetTempPathW(MAX_PATH, logPath);
-    wcscat_s(logPath, L"wse-test.log");
-    FILE* f = _wfopen(logPath, L"a, ccs=UTF-8");
-    if (f) {
-        fwprintf(f, L"%02d:%02d:%02d.%03d [%lu] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
-                 GetCurrentThreadId(), buf);
-        fclose(f);
-    }
-}
-#define Wh_Log(fmt, ...) TestLog(fmt, ##__VA_ARGS__)
-static int Wh_GetIntSetting(const wchar_t* name) {
-    if (!wcscmp(name, L"queryTimeoutMs")) return 2500;
-    return 1;  // demoProvider, pipeServer, debugLog
-}
-#endif
 
 #define LOG(fmt, ...) Wh_Log(fmt, ##__VA_ARGS__)
 #define DLOG(fmt, ...) do { if (g_settings.debugLog) Wh_Log(fmt, ##__VA_ARGS__); } while (0)
@@ -168,7 +137,6 @@ static HRESULT DupH(winrt::hstring const& s, HSTRING* out) {
 }
 
 static std::atomic<bool> g_alive{false};
-static HMODULE g_module;
 
 static void PinModule() {
     static std::once_flag once;

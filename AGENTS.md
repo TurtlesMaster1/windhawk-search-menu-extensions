@@ -11,7 +11,7 @@ first; this file covers how to work on it safely.
   demo, lifetime), then run `./build.sh` (Git Bash). `//@@ABI@@` in `body.cpp` is replaced by
   `src/pal_abi_min.h`.
 - `./build.sh` builds three things into `out/`: `mod.dll` (real Windhawk flags, proves the mod
-  compiles), the standalone test DLL `wse-test.dll` (same source without `WH_MOD`), and
+  compiles), the standalone test DLL `wse-test.dll` (the mod source with `src/test_shim.h` prepended and `src/test_main.cpp` appended, so the published mod never needs `WH_MOD` checks or Windhawk-symbol redefinitions, which the windhawk-mods validator flags), and
   `inject.exe`. `./build.sh test` skips `mod.dll`. If the test DLL is locked because it's loaded
   in the composer, use `TESTDLL=wse-test2.dll ./build.sh test`.
 - The compiler is Windhawk's bundled clang (`C:\Program Files\Windhawk\Compiler`). Keep the code

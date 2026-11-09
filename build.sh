@@ -16,6 +16,7 @@ LIBS="-lole32 -loleaut32 -lruntimeobject -lshlwapi -lshell32 -luuid"
 if [ "$1" != "test" ]; then
 "$CXX" $FLAGS -DWH_MOD '-DWH_MOD_ID=L"search-menu-extensions"' '-DWH_MOD_VERSION=L"0.1.0"' -x c++ search-menu-extensions.wh.cpp -include windhawk_api.h -Wl,--export-all-symbols -o out/mod.dll $LIBS -L"/c/Program Files/Windhawk/Engine/1.7.3/64" -lwindhawk 2>&1 | grep -E 'error|warning: unused' | head -40 || true
 fi
-"$CXX" $FLAGS -x c++ search-menu-extensions.wh.cpp -o out/${TESTDLL:-wse-test.dll} -static $LIBS 2>&1 | grep -E 'error' | head -40 || true
+cat src/test_shim.h search-menu-extensions.wh.cpp src/test_main.cpp > out/test-build.cpp
+"$CXX" $FLAGS -x c++ out/test-build.cpp -o out/${TESTDLL:-wse-test.dll} -static $LIBS 2>&1 | grep -E 'error' | head -40 || true
 "$CXX" --target=x86_64-w64-mingw32 -municode -std=c++23 -O2 -static test/inject.cpp -o out/inject.exe 2>&1 | grep -E error | head -20 || true
 ls -la out
