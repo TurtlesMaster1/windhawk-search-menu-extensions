@@ -31,6 +31,11 @@ first; this file covers how to work on it safely.
 
 ## Testing without the Windhawk engine
 
+The test DLL emulates the engine: `Wh_SetFunctionHook` there patches every pointer to the target
+in `OSClient.API.dll`'s vtables, and `TestInit`/`TestUninit` call `Wh_ModInit`, then
+`Wh_ModBeforeUninit` and `Wh_ModUninit` in the engine's order. **Disable any installed copy of the
+mod in Windhawk first**, or it answers the queries and patches the same tables.
+
 1. `./build.sh test`
 2. Open the new search once so the composer process exists, then run
    `test/restart-inject.ps1 -dlls <full path to out/wse-test.dll>`. It restarts the composer
@@ -40,6 +45,9 @@ first; this file covers how to work on it safely.
    list. `-item`, `-how`, `-button` and `-shot` act on a row or take a screenshot. Use UIA, not
    synthetic keys: an elevated window with focus blocks SendInput.
 4. The log is `%TEMP%\wse-test.log`. `out/inject.exe <pid> <dll> uninit` unloads the DLL.
+
+Under the real engine: `test/install-dev.ps1` (from an elevated PowerShell) installs `out/mod.dll`
+as the local mod with logging on, and `python test/dbwin.py <logfile> search-menu` captures the log.
 
 When you're done, restart the composer (kill the `shellhost.exe` whose command line contains
 `SystemComposerControl`) so no test DLLs stay loaded.

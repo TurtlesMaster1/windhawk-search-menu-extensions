@@ -28,7 +28,7 @@ __declspec(dllexport) UINT64 WINAPI WSE_RegisterProvider(PCWSTR providerJson, co
     if (cc.onCancel) cb.onCancel = [cc](UINT64 q) { cc.onCancel(cc.ctx, q); };
     if (cc.onDetach) cb.onDetach = [cc] { cc.onDetach(cc.ctx); };
     std::wstring err;
-    UINT64 h = RegisterProvider(providerJson, std::move(cb), nullptr, &err);
+    UINT64 h = RegisterProvider(providerJson, std::move(cb), &err);
     if (!h) LOG(L"WSE_RegisterProvider failed: %s", err.c_str());
     return h;
 }
@@ -42,13 +42,19 @@ __declspec(dllexport) BOOL WINAPI WSE_UpdateCard(UINT64 p, PCWSTR itemId, PCWSTR
     return itemId && dataJson && UpdateCard(p, itemId, dataJson);
 }
 __declspec(dllexport) BOOL WINAPI WSE_NotifyChanged(UINT64 p) { return NotifyChanged(p); }
+// Blocks until the provider's running callbacks return, so it's safe to unload right after.
 __declspec(dllexport) BOOL WINAPI WSE_UnregisterProvider(UINT64 p) { return UnregisterProvider(p); }
 }
 
 // ---------------------------------------------------------------------------
 // Named pipe server (out-of-process clients)
 // ---------------------------------------------------------------------------
-static const wchar_t kPipeName[] = L"\\\\.\\pipe\\WindhawkSearchExtensions";
+// One pipe per session: \\.\pipe\WindhawkSearchExtensions-<session id>, current user only.
+static std::wstring PipeName() {
+    DWORD session = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    return L"\\\\.\\pipe\\WindhawkSearchExtensions-" + std::to_wstring(session);
+}
 
 static std::string ToUtf8(std::wstring const& w) {
     if (w.empty()) return {};
@@ -70,13 +76,13 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
     std::mutex writeLock;
     std::mutex provLock;
     std::map<std::wstring, UINT64> providers;  // id -> handle
-    std::map<UINT64, std::wstring> queryProvider;
     std::atomic<bool> closed{false};
 
     void Send(wdj::JsonObject const& o) {
         if (closed) return;
         std::string line = ToUtf8(std::wstring(o.Stringify())) + "\n";
         std::lock_guard l(writeLock);
+        if (pipe == INVALID_HANDLE_VALUE) return;
         OVERLAPPED ov{};
         ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         DWORD w = 0;
@@ -121,10 +127,6 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
             cb.onQuery = [self, id](UINT64 q, std::wstring const& text, std::wstring const& json) {
                 auto c = self.lock();
                 if (!c) return;
-                {
-                    std::lock_guard l(c->provLock);
-                    c->queryProvider[q] = id;
-                }
                 wdj::JsonObject m;
                 m.SetNamedValue(L"op", wdj::JsonValue::CreateStringValue(L"query"));
                 m.SetNamedValue(L"provider", wdj::JsonValue::CreateStringValue(id));
@@ -157,7 +159,7 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
                 c->Send(m);
             };
             std::wstring err;
-            UINT64 h = RegisterProvider(std::wstring(po.Stringify()), std::move(cb), this, &err);
+            UINT64 h = RegisterProvider(std::wstring(po.Stringify()), std::move(cb), &err);
             if (!h) {
                 Error(L"register failed: " + err);
                 return;
@@ -204,7 +206,6 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
     }
 
     void Run(HANDLE stopEvent) {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
         std::string buf;
         char chunk[8192];
         HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -244,37 +245,76 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
             }
         }
         CloseHandle(ev);
-        closed = true;
+        // Unregistering waits for this client's callbacks (which write to the pipe) to finish.
         std::map<std::wstring, UINT64> ps;
         {
             std::lock_guard l(provLock);
             ps.swap(providers);
         }
         for (auto& [id, h] : ps) UnregisterProvider(h);
+        closed = true;
         std::lock_guard l(writeLock);
         DisconnectNamedPipe(pipe);
         CloseHandle(pipe);
         pipe = INVALID_HANDLE_VALUE;
-        winrt::uninit_apartment();
     }
 };
 
+// Raw handles only: nothing here has a destructor that could run at process exit.
 static HANDLE g_pipeStop;
-static std::thread g_pipeThread;
+static HANDLE g_pipeThread;
 static std::mutex g_clientThreadsLock;
-static std::vector<std::thread> g_clientThreads;
+[[clang::no_destroy]] static std::vector<HANDLE> g_clientThreads;
 
-static void PipeListener() {
+static DWORD WINAPI ClientThread(void* ctx) {
+    std::unique_ptr<std::shared_ptr<PipeClient>> c((std::shared_ptr<PipeClient>*)ctx);
+    (*c)->Run(g_pipeStop);
+    return 0;
+}
+
+// Security descriptor for the pipe: the current user and SYSTEM only.
+static bool PipeSecurity(SECURITY_ATTRIBUTES* sa) {
+    HANDLE token;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    BYTE buf[256];
+    DWORD len = 0;
+    bool ok = GetTokenInformation(token, TokenUser, buf, sizeof(buf), &len);
+    CloseHandle(token);
+    if (!ok) return false;
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(((TOKEN_USER*)buf)->User.Sid, &sid)) return false;
+    std::wstring sddl = L"D:P(A;;GA;;;" + std::wstring(sid) + L")(A;;GA;;;SY)";
+    LocalFree(sid);
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr)) return false;
+    sa->nLength = sizeof(*sa);
+    sa->lpSecurityDescriptor = sd;  // freed by the listener
+    sa->bInheritHandle = FALSE;
+    return true;
+}
+
+static DWORD WINAPI PipeListener(void*) {
+    std::wstring name = PipeName();
+    SECURITY_ATTRIBUTES sa{};
+    if (!PipeSecurity(&sa)) {
+        LOG(L"pipe: could not build its security descriptor (%lu), not starting", GetLastError());
+        return 0;
+    }
     HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    bool first = true;
     while (WaitForSingleObject(g_pipeStop, 0) != WAIT_OBJECT_0) {
-        HANDLE pipe = CreateNamedPipeW(kPipeName, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        DWORD openMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0);
+        HANDLE pipe = CreateNamedPipeW(name.c_str(), openMode,
                                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                                       PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, nullptr);
+                                       PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
-            LOG(L"CreateNamedPipe failed: %lu", GetLastError());
+            // ACCESS_DENIED on the first instance: someone else already owns this name.
+            LOG(L"CreateNamedPipe(%s) failed: %lu", name.c_str(), GetLastError());
             if (WaitForSingleObject(g_pipeStop, 5000) == WAIT_OBJECT_0) break;
             continue;
         }
+        if (first) LOG(L"pipe server listening on %s", name.c_str());
+        first = false;
         OVERLAPPED ov{};
         ov.hEvent = ev;
         ResetEvent(ev);
@@ -282,12 +322,13 @@ static void PipeListener() {
         DWORD err = GetLastError();
         if (!connected && err == ERROR_IO_PENDING) {
             HANDLE hs[2] = {ev, g_pipeStop};
+            DWORD dummy;
             if (WaitForMultipleObjects(2, hs, FALSE, INFINITE) != WAIT_OBJECT_0) {
                 CancelIoEx(pipe, &ov);
+                GetOverlappedResult(pipe, &ov, &dummy, TRUE);  // the kernel is done with ov after this
                 CloseHandle(pipe);
                 break;
             }
-            DWORD dummy;
             connected = GetOverlappedResult(pipe, &ov, &dummy, FALSE);
         } else if (!connected && err == ERROR_PIPE_CONNECTED) {
             connected = TRUE;
@@ -298,28 +339,50 @@ static void PipeListener() {
         }
         auto c = std::make_shared<PipeClient>();
         c->pipe = pipe;
-        DLOG(L"pipe client connected");
+        LOG(L"pipe client connected");
         std::lock_guard l(g_clientThreadsLock);
-        g_clientThreads.emplace_back([c] { c->Run(g_pipeStop); });
+        // Forget clients that have already disconnected.
+        std::erase_if(g_clientThreads, [](HANDLE t) {
+            if (WaitForSingleObject(t, 0) != WAIT_OBJECT_0) return false;
+            CloseHandle(t);
+            return true;
+        });
+        auto* ctx = new std::shared_ptr<PipeClient>(c);
+        if (HANDLE t = CreateThread(nullptr, 0, ClientThread, ctx, 0, nullptr)) {
+            g_clientThreads.push_back(t);
+        } else {
+            delete ctx;
+            DisconnectNamedPipe(pipe);
+            CloseHandle(pipe);
+        }
     }
     CloseHandle(ev);
+    LocalFree(sa.lpSecurityDescriptor);
+    return 0;
 }
 
 static void StartPipe() {
+    if (g_pipeThread) return;
     g_pipeStop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_pipeThread = std::thread(PipeListener);
+    g_pipeThread = CreateThread(nullptr, 0, PipeListener, nullptr, 0, nullptr);
 }
 static void StopPipe() {
     if (!g_pipeStop) return;
     SetEvent(g_pipeStop);
-    if (g_pipeThread.joinable()) g_pipeThread.join();
-    std::vector<std::thread> ts;
+    if (g_pipeThread) {
+        WaitForSingleObject(g_pipeThread, INFINITE);
+        CloseHandle(g_pipeThread);
+        g_pipeThread = nullptr;
+    }
+    std::vector<HANDLE> ts;
     {
         std::lock_guard l(g_clientThreadsLock);
         ts.swap(g_clientThreads);
     }
-    for (auto& t : ts)
-        if (t.joinable()) t.join();
+    for (HANDLE t : ts) {
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+    }
     CloseHandle(g_pipeStop);
     g_pipeStop = nullptr;
 }
@@ -327,7 +390,7 @@ static void StopPipe() {
 // ---------------------------------------------------------------------------
 // Demo provider
 // ---------------------------------------------------------------------------
-static UINT64 g_demo;
+static std::atomic<UINT64> g_demo{0};
 static std::atomic<bool> g_demoToggle{false};
 static std::atomic<int> g_demoClicks{0};
 
@@ -351,21 +414,21 @@ static void DemoQuery(UINT64 q, std::wstring const& text) {
     json += L"{\"id\":\"toggle\",\"title\":\"Demo toggle\",\"subtitle\":\"Flips a value inside the library\","
             L"\"icon\":{\"glyph\":\"\\uE7E8\"},\"kinds\":[\"Toggle\",\"Command\"],"
             L"\"action\":{\"type\":\"toggle\",\"isToggled\":" + std::wstring(g_demoToggle ? L"true" : L"false") + L"}},";
-    json += L"{\"id\":\"open\",\"title\":\"Open Windhawk\",\"subtitle\":\"Runs windhawk.exe\","
-            L"\"icon\":{\"glyph\":\"\\uE8A7\"},"
-            L"\"action\":{\"type\":\"run\",\"command\":\"C:\\\\Program Files\\\\Windhawk\\\\windhawk.exe\"}},";
+    json += L"{\"id\":\"notepad\",\"title\":\"Open Notepad\",\"subtitle\":\"A \\\"run\\\" action\","
+            L"\"icon\":{\"glyph\":\"\\uE70B\"},"
+            L"\"action\":{\"type\":\"run\",\"command\":\"notepad.exe\"}},";
     json += L"{\"id\":\"card\",\"title\":\"Demo card\",\"subtitle\":\"Adaptive Card content from a mod\","
             L"\"icon\":{\"glyph\":\"\\uE9E9\"},"
             L"\"card\":{\"template\":{\"type\":\"AdaptiveCard\",\"version\":\"1.5\",\"body\":["
             L"{\"type\":\"TextBlock\",\"text\":\"${title}\",\"weight\":\"Bolder\",\"size\":\"Large\"},"
-            L"{\"type\":\"TextBlock\",\"text\":\"Clicked ${clicks} times\",\"wrap\":true}],"
-            L"\"actions\":[{\"type\":\"Action.Submit\",\"id\":\"click\",\"title\":\"Click me\",\"data\":{\"x\":1}}]},"
+            L"{\"type\":\"TextBlock\",\"text\":\"Invoked ${clicks} times\",\"wrap\":true}]},"
             L"\"data\":{\"title\":\"Hello from Windhawk\",\"clicks\":" + std::to_wstring(g_demoClicks.load()) + L"}}}";
     json += L"]";
     SubmitResults(q, json, TRUE);
 }
 
 static void RegisterDemo() {
+    if (g_demo) return;
     ProviderCallbacks cb;
     cb.onQuery = [](UINT64 q, std::wstring const& text, std::wstring const&) { DemoQuery(q, text); };
     cb.onInvoke = [](std::wstring const& item, std::wstring const& action, std::wstring const& data, std::wstring const&) {
@@ -377,10 +440,14 @@ static void RegisterDemo() {
         LOG(L"demo invoke %s/%s", item.c_str(), action.c_str());
     };
     std::wstring err;
-    g_demo = RegisterProvider(
+    UINT64 h = RegisterProvider(
         L"{\"id\":\"demo\",\"name\":\"Windhawk demo\",\"description\":\"Search Menu Extensions sample items\",\"glyph\":\"\\uE8D4\"}",
-        std::move(cb), nullptr, &err);
-    if (!g_demo) LOG(L"demo registration failed: %s", err.c_str());
+        std::move(cb), &err);
+    if (!h) LOG(L"demo registration failed: %s", err.c_str());
+    g_demo = h;
+}
+static void UnregisterDemo() {
+    if (UINT64 h = g_demo.exchange(0)) UnregisterProvider(h);
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +458,6 @@ static void LoadSettings() {
     g_settings.pipeServer = Wh_GetIntSetting(L"pipeServer") != 0;
     g_settings.queryTimeoutMs = Wh_GetIntSetting(L"queryTimeoutMs");
     if (g_settings.queryTimeoutMs < 100 || g_settings.queryTimeoutMs > 60000) g_settings.queryTimeoutMs = 2500;
-    g_settings.debugLog = Wh_GetIntSetting(L"debugLog") != 0;
     g_settings.restartIfLate = Wh_GetIntSetting(L"restartIfLate") != 0;
 }
 
@@ -400,83 +466,107 @@ static bool IsComposerProcess() {
     return cmd && StrStrIW(cmd, L"SystemComposerControl");
 }
 
+static CO_MTA_USAGE_COOKIE g_mtaCookie;
 static bool g_started;
+static bool g_stopped;
 
-static bool LibInit() {
-    LoadSettings();
-    if (!IsComposerProcess()) {
-        DLOG(L"not the composer shellhost, idle");
-        return true;
-    }
+// Enabled while search was already running: Windows has read its provider list and won't re-read
+// it (we never saw its Changed subscription), so restart the composer. It relaunches the next
+// time search opens, with us in it.
+static VOID CALLBACK LateLoadCheck(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER) {
+    bool haveSubs;
     {
-        using IncMta_t = HRESULT(WINAPI*)(void**);
-        static void* cookie;
-        if (auto f = (IncMta_t)GetProcAddress(GetModuleHandleW(L"combase.dll"), "CoIncrementMTAUsage")) f(&cookie);
-    }  // so any thread can use WinRT objects
-    bool lateLoad = GetModuleHandleW(L"RunUX.AOT.dll") != nullptr;
-    (void)lateLoad;
-    g_alive = true;
-    if (!InstallCatalogHooks()) {
-        g_alive = false;
-        return true;  // stay loaded but inactive
+        std::lock_guard l(g_subsLock);
+        haveSubs = !g_subs.empty();
     }
-    g_started = true;
-    // Patch the catalog instance vtables now in case Windows already opened its catalogs.
-    std::thread([] {
-        winrt::init_apartment(winrt::apartment_type::multi_threaded);
-        winrt::com_ptr<Pal::IPaletteCatalog> cat;
-        HRESULT hr = g_statics->OpenDefault(cat.put());
-        LOG(L"background OpenDefault hr=%08lx", hr);
-        if (g_settings.demoProvider) RegisterDemo();
-        winrt::uninit_apartment();
-    }).detach();
-    if (g_settings.pipeServer) StartPipe();
-    LOG(L"Search Menu Extensions running (pid %lu)", GetCurrentProcessId());
-    // Enabled while search was already running: Windows has read its provider list and won't
-    // re-read it, so restart the composer (it relaunches the next time search opens, with us in it).
-    if (lateLoad && g_settings.restartIfLate) {
-        std::thread([] {
-            Sleep(1500);
-            bool haveSubs;
-            {
-                std::lock_guard l(g_subsLock);
-                haveSubs = !g_subs.empty();
-            }
-            if (!haveSubs && g_alive) {
-                LOG(L"loaded after search started; restarting the composer so it picks up our providers");
-                TerminateProcess(GetCurrentProcess(), 0);
-            }
-        }).detach();
+    if (!haveSubs && g_alive) {
+        LOG(L"loaded after search started; restarting the composer so it picks up our providers");
+        TerminateProcess(GetCurrentProcess(), 0);
     }
-    return true;
 }
 
-static void LibUninit() {
-    if (!g_started) return;
-    StopPipe();
+BOOL Wh_ModInit() {
+    g_stopped = false;
+    LoadSettings();
+    if (!IsComposerProcess()) return FALSE;  // not the search composer: nothing to do here
+    if (FAILED(CoIncrementMTAUsage(&g_mtaCookie))) g_mtaCookie = nullptr;  // lets any thread use WinRT
+    if (!PoolOpen()) return FALSE;
+    g_alive = true;
+    if (!SetCatalogHooks()) {
+        g_alive = false;
+        PoolClose();
+        if (g_mtaCookie) CoDecrementMTAUsage(g_mtaCookie);
+        return FALSE;
+    }
+    g_changeTimer = PoolTimer(ChangeTimerCb, nullptr);
+    bool lateLoad = GetModuleHandleW(L"RunUX.AOT.dll") != nullptr;
+    if (g_settings.demoProvider) RegisterDemo();
+    if (g_settings.pipeServer) StartPipe();
+    if (lateLoad && g_settings.restartIfLate)
+        if (PTP_TIMER t = PoolTimer(LateLoadCheck, nullptr)) ArmTimer(t, 1500);
+    g_started = true;
+    LOG(L"Search Menu Extensions running (pid %lu)", GetCurrentProcessId());
+    return TRUE;
+}
+
+// Hooks are still active here: take our providers out and tell Windows to re-read the catalog.
+void Wh_ModBeforeUninit() {
+    if (!g_started || g_stopped) return;
+    g_stopped = true;
+    StopPipe();  // pipe clients unregister their providers as they disconnect
     std::vector<UINT64> hs;
     for (auto& p : ProvidersSnapshot()) hs.push_back(p->handle);
-    for (auto h : hs) UnregisterProvider(h, true);
-    g_alive = false;
-    UnpatchAll();
+    for (auto h : hs) UnregisterProvider(h, true);  // in-process clients get onDetach
+    g_demo = 0;
+    std::vector<std::shared_ptr<Query>> qs;
+    {
+        std::lock_guard l(g_queriesLock);
+        g_alive = false;  // under this lock, so no query is added after the snapshot
+        for (auto& [k, q] : g_queries) qs.push_back(q);
+    }
+    for (auto& q : qs) FinishQuery(q, L"unloading");
     RaiseCatalogChanged();
-    // Keep g_subs: if we're re-initialised in this process we can refresh search without a restart.
+}
+
+void Wh_ModUninit() {
+    if (!g_started) return;
+    Wh_ModBeforeUninit();
+    g_changeTimer = nullptr;
+    PoolClose();  // waits for every worker callback and timer
+    {
+        std::lock_guard l(g_subsLock);
+        g_subs.clear();
+    }
+    {
+        std::lock_guard l(g_providersLock);
+        g_providers.clear();
+    }
+    {
+        std::lock_guard l(g_queriesLock);
+        g_queries.clear();
+    }
+    ReleaseFactories();
+    // Windows may still hold objects whose code lives in this DLL (definitions, items' delegates,
+    // finished async operations). Give it a moment to drop them after the Changed event; if it
+    // doesn't, restart the composer rather than let the DLL unload under them. Search relaunches
+    // it on next use.
+    for (int i = 0; i < 40 && g_liveObjects > 0; i++) Sleep(50);
+    if (g_liveObjects > 0) {
+        LOG(L"Windows still holds %d of our objects; restarting the composer", g_liveObjects.load());
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+    if (g_mtaCookie) CoDecrementMTAUsage(g_mtaCookie);
+    g_mtaCookie = nullptr;
     g_started = false;
     LOG(L"Search Menu Extensions stopped");
 }
 
-BOOL Wh_ModInit() {
-    LOG(L"Init");
-    return LibInit();
-}
-void Wh_ModUninit() { LibUninit(); }
 void Wh_ModSettingsChanged() {
-    bool oldDemo = g_settings.demoProvider;
+    bool oldDemo = g_settings.demoProvider, oldPipe = g_settings.pipeServer;
     LoadSettings();
-    if (!g_started) return;
-    if (g_settings.demoProvider && !g_demo) RegisterDemo();
-    if (!g_settings.demoProvider && oldDemo && g_demo) {
-        UnregisterProvider(g_demo);
-        g_demo = 0;
-    }
+    if (!g_started || g_stopped) return;
+    if (g_settings.demoProvider && !oldDemo) RegisterDemo();
+    if (!g_settings.demoProvider && oldDemo) UnregisterDemo();
+    if (g_settings.pipeServer && !oldPipe) StartPipe();
+    if (!g_settings.pipeServer && oldPipe) StopPipe();
 }

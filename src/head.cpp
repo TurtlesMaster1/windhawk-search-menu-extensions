@@ -6,7 +6,8 @@
 // @author          TurtlesMaster1
 // @github          https://github.com/TurtlesMaster1
 // @include         shellhost.exe
-// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshell32 -luuid
+// @architecture    x86-64
+// @compilerOptions -lole32 -loleaut32 -lruntimeobject -lshlwapi -lshell32 -luuid -ladvapi32
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -26,7 +27,7 @@ or Windows 10.
 ![Demo provider items mixed into the new Windows search](https://raw.githubusercontent.com/TurtlesMaster1/windhawk-search-menu-extensions/main/images/demo.png)
 
 A **dependency mod**: on its own it only adds an optional demo provider (type
-`wh hello`). Other mods (or any program/script) use it to put items into the new
+`wh hello` to see an echo/copy item, a toggle, a "run" item and a card). Other mods (or any program/script) use it to put items into the new
 search box. Providers see every query and decide for themselves when to answer,
 so no prefix is needed.
 
@@ -70,18 +71,29 @@ BOOL   WINAPI WSE_SubmitResults(UINT64 queryHandle, PCWSTR itemsJson, BOOL done)
 BOOL   WINAPI WSE_SetStaticItems(UINT64 provider, PCWSTR itemsJson);     // items always offered (GetItems)
 BOOL   WINAPI WSE_UpdateCard(UINT64 provider, PCWSTR itemId, PCWSTR dataJson); // live-update a card's data
 BOOL   WINAPI WSE_NotifyChanged(UINT64 provider);                        // ask search to re-query
-BOOL   WINAPI WSE_UnregisterProvider(UINT64 provider);
+BOOL   WINAPI WSE_UnregisterProvider(UINT64 provider);                   // waits for running callbacks
 ```
 
-Finding the library: enumerate the modules of the process and pick the one whose
-file name starts with `search-menu-extensions_`, then `GetProcAddress`. Mods load
-in any order, so retry for a few seconds if it isn't there yet.
+Finding the library: enumerate the modules of the process and use the first one
+that exports `WSE_GetApiVersion`. Mods load in any order, so retry for a few
+seconds if it isn't there yet (and again later: the library can be disabled,
+updated or re-enabled while your mod is running; `onDetach` tells you it's going).
+
+Callbacks run on the library's worker threads, never on Windows' own threads.
+Call `WSE_UnregisterProvider` in your `Wh_ModUninit`: it returns once none of
+your callbacks is running any more, so your DLL can unload safely. (Calling it
+from inside one of your own callbacks is fine too; it then waits for the others.)
 
 ### 2. From any process (named pipe)
 
-Connect to `\\.\pipe\WindhawkSearchExtensions` and exchange **newline-delimited
-UTF-8 JSON** messages. Each connection can register any number of providers.
-They're removed automatically when the connection closes.
+Connect to `\\.\pipe\WindhawkSearchExtensions-<session id>` (the Windows
+session id of your process, e.g. `ProcessIdToSessionId`) and exchange
+**newline-delimited UTF-8 JSON** messages. Each connection can register any
+number of providers. They're removed automatically when the connection closes.
+
+Only processes running as the same user can open the pipe. Any of them can
+register a provider, and a provider sees the text typed into search. Turn off
+**Named pipe API** if you don't use it.
 
 Client to library:
 
@@ -151,6 +163,9 @@ Library to client:
   (setting **Restart search when enabled late**). The composer comes back the
   next time you open search. Providers registered later (other mods, pipe
   clients) are picked up live.
+* When the mod is disabled or updated, Windows may still hold some of its
+  objects (items it's showing, finished queries). The library then restarts the
+  composer instead of unloading under them; search reopens normally next time.
 * **Card buttons:** cards render under the selected row and you can update them
   live (`WSE_UpdateCard` / `updateCard`). But Windows ignores Action.Submit
   buttons in that inline preview ("slot previews do not support card actions").
@@ -160,8 +175,8 @@ Library to client:
   thread while another is blocked reading. Windows serializes I/O on
   synchronous handles and the write waits forever. Either answer from the
   reading thread or open the pipe overlapped.
-* Turn on **Debug logging** and open the Windhawk log to see the queries and
-  what Windows asks of the providers.
+* Enable logging for the mod in Windhawk to see the queries and what Windows
+  asks of the providers.
 */
 // ==/WindhawkModReadme==
 
@@ -169,17 +184,15 @@ Library to client:
 /*
 - demoProvider: true
   $name: Demo provider
-  $description: Adds sample items when you type "wh" (echo, toggle, card, launcher). Handy to check the library works.
+  $description: Adds sample items when you type "wh" (echo, toggle, card, run). Handy to check the library works.
 - pipeServer: true
   $name: Named pipe API
-  $description: Let other processes and scripts add items through \\.\pipe\WindhawkSearchExtensions
+  $description: Let other processes and scripts (same user only) add items through \\.\pipe\WindhawkSearchExtensions-<session id>
 - queryTimeoutMs: 2500
   $name: Provider timeout (ms)
   $description: How long to wait for a provider's results before showing what it has so far
 - restartIfLate: true
   $name: Restart search when enabled late
   $description: If the mod is enabled while the search composer is already running, restart it (it reopens on next use) so Windows picks up the providers
-- debugLog: false
-  $name: Debug logging
 */
 // ==/WindhawkModSettings==

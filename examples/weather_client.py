@@ -8,8 +8,18 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import ctypes
+import os
 
-PIPE = r'\\.\pipe\WindhawkSearchExtensions'
+
+def pipe_name():
+    # One pipe per Windows session: \\.\pipe\WindhawkSearchExtensions-<session id>
+    session = ctypes.c_ulong()
+    ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session))
+    return r'\\.\pipe\WindhawkSearchExtensions-%d' % session.value
+
+
+PIPE = pipe_name()
 
 
 class Client:

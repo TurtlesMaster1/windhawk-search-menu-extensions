@@ -13,7 +13,7 @@
 /*
 # Search: kill process
 
-Needs the **Search Menu Extensions (library)** mod.
+Needs the **New Windows Search Extensions (library)** mod.
 
 Type `kill note` in the new search box. Each running process whose name matches
 shows up with its PID and memory use. Press Enter on a row to end that process.

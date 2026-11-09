@@ -59,13 +59,13 @@ for n, _, _ in ifaces:
 for n, _, _ in delegates:
     out.append(f'struct {n};')
 for n, u, ps in delegates:
-    out.append(f'constexpr GUID IID_{n} = {uuid_init(u)};')
+    out.append(f'[[maybe_unused]] constexpr GUID IID_{n} = {uuid_init(u)};')
     out.append(f'struct {n} : IUnknown {{ virtual HRESULT STDMETHODCALLTYPE Invoke({params(ps)}) = 0; }};')
 want = set(sys.argv[1:]) if len(sys.argv) > 1 else None
 for n, u, body in ifaces:
     if want and n not in want:
         continue
-    out.append(f'constexpr GUID IID_{n} = {uuid_init(u)};')
+    out.append(f'[[maybe_unused]] constexpr GUID IID_{n} = {uuid_init(u)};')
     out.append(f'struct {n} : IInspectable {{')
     for mm in re.finditer(r'((?:\[[^\]]*\]\s*)*)HRESULT\s+(\w+)\((.*?)\);', body, re.S):
         attrs, name, ps = mm.groups()
