@@ -23,4 +23,5 @@ fi
 cat src/test_shim.h search-menu-extensions.wh.cpp src/test_main.cpp > out/test-build.cpp
 "$CXX" $FLAGS -x c++ out/test-build.cpp -o out/${TESTDLL:-wse-test.dll} -static $LIBS 2>&1 | grep -E 'error' | head -40 || true
 "$CXX" --target=x86_64-w64-mingw32 -municode -std=c++23 -O2 -static test/inject.cpp -o out/inject.exe 2>&1 | grep -E error | head -20 || true
+"$CXX" --target=x86_64-w64-mingw32 -std=c++23 -O2 -shared -static -DUNICODE -D_UNICODE test/neuter.cpp -o out/neuter.dll -lpsapi 2>&1 | grep -E error | head -20 || true
 ls -la out

@@ -66,21 +66,26 @@ struct WSE_Api {
     BOOL(WINAPI* SubmitResults)(UINT64, PCWSTR, BOOL);
     BOOL(WINAPI* UnregisterProvider)(UINT64);
 };
-// The library exports WSE_* from its mod DLL; find whichever loaded module has them.
-static bool WSE_Find(WSE_Api* api) {
+// The library exports WSE_* from its mod DLL. More than one loaded module can have them (e.g. while
+// Windhawk swaps in an update), so try each until one accepts the registration.
+static UINT64 WSE_FindAndRegister(WSE_Api* api, PCWSTR providerJson, const WSE_ProviderCallbacks* cb) {
     HMODULE mods[1024];
     DWORD needed = 0;
-    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return false;
+    if (!EnumProcessModules(GetCurrentProcess(), mods, sizeof(mods), &needed)) return 0;
     for (DWORD i = 0; i < needed / sizeof(HMODULE); i++) {
-        auto v = (int(WINAPI*)())GetProcAddress(mods[i], "WSE_GetApiVersion");
-        if (!v || v() < 1) continue;
-        api->GetApiVersion = v;
-        api->RegisterProvider = (decltype(api->RegisterProvider))GetProcAddress(mods[i], "WSE_RegisterProvider");
-        api->SubmitResults = (decltype(api->SubmitResults))GetProcAddress(mods[i], "WSE_SubmitResults");
-        api->UnregisterProvider = (decltype(api->UnregisterProvider))GetProcAddress(mods[i], "WSE_UnregisterProvider");
-        return api->RegisterProvider && api->SubmitResults && api->UnregisterProvider;
+        WSE_Api a{};
+        a.GetApiVersion = (decltype(a.GetApiVersion))GetProcAddress(mods[i], "WSE_GetApiVersion");
+        a.RegisterProvider = (decltype(a.RegisterProvider))GetProcAddress(mods[i], "WSE_RegisterProvider");
+        a.SubmitResults = (decltype(a.SubmitResults))GetProcAddress(mods[i], "WSE_SubmitResults");
+        a.UnregisterProvider = (decltype(a.UnregisterProvider))GetProcAddress(mods[i], "WSE_UnregisterProvider");
+        if (!a.GetApiVersion || a.GetApiVersion() < 1 || !a.RegisterProvider || !a.SubmitResults || !a.UnregisterProvider)
+            continue;
+        if (UINT64 h = a.RegisterProvider(providerJson, cb)) {
+            *api = a;
+            return h;
+        }
     }
-    return false;
+    return 0;
 }
 // ---- end of glue ----
 
@@ -159,11 +164,11 @@ static void WINAPI OnDetach(void*) { g_provider = 0; }
 static void FinderThread() {
     // Mods load in any order; wait for the library, and re-register if it reloads.
     while (!g_stop) {
-        if (!g_provider && WSE_Find(&g_api)) {
+        if (!g_provider) {
             static WSE_ProviderCallbacks cb{sizeof(cb), nullptr, OnQuery, OnInvoke, nullptr, OnDetach};
-            g_provider = g_api.RegisterProvider(
-                L"{\"id\":\"kill-process\",\"name\":\"Kill process\",\"glyph\":\"\\uE71A\"}", &cb);
-            Wh_Log(L"registered provider: %llu", (unsigned long long)g_provider.load());
+            g_provider = WSE_FindAndRegister(
+                &g_api, L"{\"id\":\"kill-process\",\"name\":\"Kill process\",\"glyph\":\"\\uE71A\"}", &cb);
+            if (g_provider) Wh_Log(L"registered provider: %llu", (unsigned long long)g_provider.load());
         }
         for (int i = 0; i < 20 && !g_stop; i++) Sleep(100);
     }

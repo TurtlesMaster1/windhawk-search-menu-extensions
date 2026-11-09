@@ -33,8 +33,12 @@ first; this file covers how to work on it safely.
 
 The test DLL emulates the engine: `Wh_SetFunctionHook` there patches every pointer to the target
 in `OSClient.API.dll`'s vtables, and `TestInit`/`TestUninit` call `Wh_ModInit`, then
-`Wh_ModBeforeUninit` and `Wh_ModUninit` in the engine's order. **Disable any installed copy of the
-mod in Windhawk first**, or it answers the queries and patches the same tables.
+`Wh_ModBeforeUninit` and `Wh_ModUninit` in the engine's order. An installed copy of the mod (Windhawk
+loads it into the composer too) answers the queries and patches the same functions: disable it, or
+inject `out/neuter.dll` first (`restart-inject.ps1 -dlls <neuter.dll>,<wse-test.dll>`), which calls
+that copy's exported `Wh_ModUninit` in the test composer only. Hooks are applied after injection, so
+if the log says "raising PaletteCatalog.Changed to 1 subscribers" Windows subscribed before the
+hooks: live registration won't show up, so restart-inject again until it says 2.
 
 1. `./build.sh test`
 2. Open the new search once so the composer process exists, then run
