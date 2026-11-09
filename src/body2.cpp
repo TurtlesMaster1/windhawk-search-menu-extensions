@@ -29,7 +29,7 @@ __declspec(dllexport) UINT64 WINAPI WSE_RegisterProvider(PCWSTR providerJson, co
     if (cc.onDetach) cb.onDetach = [cc] { cc.onDetach(cc.ctx); };
     std::wstring err;
     UINT64 h = RegisterProvider(providerJson, std::move(cb), &err);
-    if (!h) LOG(L"WSE_RegisterProvider failed: %s", err.c_str());
+    if (!h) Wh_Log(L"WSE_RegisterProvider failed: %s", err.c_str());
     return h;
 }
 __declspec(dllexport) BOOL WINAPI WSE_SubmitResults(UINT64 q, PCWSTR itemsJson, BOOL done) {
@@ -264,7 +264,7 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
 static HANDLE g_pipeStop;
 static HANDLE g_pipeThread;
 static std::mutex g_clientThreadsLock;
-[[clang::no_destroy]] static std::vector<HANDLE> g_clientThreads;
+static std::vector<HANDLE> g_clientThreads;  // plain handles
 
 static DWORD WINAPI ClientThread(void* ctx) {
     std::unique_ptr<std::shared_ptr<PipeClient>> c((std::shared_ptr<PipeClient>*)ctx);
@@ -297,7 +297,7 @@ static DWORD WINAPI PipeListener(void*) {
     std::wstring name = PipeName();
     SECURITY_ATTRIBUTES sa{};
     if (!PipeSecurity(&sa)) {
-        LOG(L"pipe: could not build its security descriptor (%lu), not starting", GetLastError());
+        Wh_Log(L"pipe: could not build its security descriptor (%lu), not starting", GetLastError());
         return 0;
     }
     HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -309,11 +309,11 @@ static DWORD WINAPI PipeListener(void*) {
                                        PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, &sa);
         if (pipe == INVALID_HANDLE_VALUE) {
             // ACCESS_DENIED on the first instance: someone else already owns this name.
-            LOG(L"CreateNamedPipe(%s) failed: %lu", name.c_str(), GetLastError());
+            Wh_Log(L"CreateNamedPipe(%s) failed: %lu", name.c_str(), GetLastError());
             if (WaitForSingleObject(g_pipeStop, 5000) == WAIT_OBJECT_0) break;
             continue;
         }
-        if (first) LOG(L"pipe server listening on %s", name.c_str());
+        if (first) Wh_Log(L"pipe server listening on %s", name.c_str());
         first = false;
         OVERLAPPED ov{};
         ov.hEvent = ev;
@@ -339,7 +339,7 @@ static DWORD WINAPI PipeListener(void*) {
         }
         auto c = std::make_shared<PipeClient>();
         c->pipe = pipe;
-        LOG(L"pipe client connected");
+        Wh_Log(L"pipe client connected");
         std::lock_guard l(g_clientThreadsLock);
         // Forget clients that have already disconnected.
         std::erase_if(g_clientThreads, [](HANDLE t) {
@@ -437,13 +437,13 @@ static void RegisterDemo() {
             int n = ++g_demoClicks;
             UpdateCard(g_demo, L"card", L"{\"title\":\"Hello from Windhawk\",\"clicks\":" + std::to_wstring(n) + L"}");
         }
-        LOG(L"demo invoke %s/%s", item.c_str(), action.c_str());
+        Wh_Log(L"demo invoke %s/%s", item.c_str(), action.c_str());
     };
     std::wstring err;
     UINT64 h = RegisterProvider(
         L"{\"id\":\"demo\",\"name\":\"Windhawk demo\",\"description\":\"Search Menu Extensions sample items\",\"glyph\":\"\\uE8D4\"}",
         std::move(cb), &err);
-    if (!h) LOG(L"demo registration failed: %s", err.c_str());
+    if (!h) Wh_Log(L"demo registration failed: %s", err.c_str());
     g_demo = h;
 }
 static void UnregisterDemo() {
@@ -480,7 +480,7 @@ static VOID CALLBACK LateLoadCheck(PTP_CALLBACK_INSTANCE, PVOID, PTP_TIMER) {
         haveSubs = !g_subs.empty();
     }
     if (!haveSubs && g_alive) {
-        LOG(L"loaded after search started; restarting the composer so it picks up our providers");
+        Wh_Log(L"loaded after search started; restarting the composer so it picks up our providers");
         TerminateProcess(GetCurrentProcess(), 0);
     }
 }
@@ -505,7 +505,7 @@ BOOL Wh_ModInit() {
     if (lateLoad && g_settings.restartIfLate)
         if (PTP_TIMER t = PoolTimer(LateLoadCheck, nullptr)) ArmTimer(t, 1500);
     g_started = true;
-    LOG(L"Search Menu Extensions running (pid %lu)", GetCurrentProcessId());
+    Wh_Log(L"Search Menu Extensions running (pid %lu)", GetCurrentProcessId());
     return TRUE;
 }
 
@@ -513,6 +513,10 @@ BOOL Wh_ModInit() {
 void Wh_ModBeforeUninit() {
     if (!g_started || g_stopped) return;
     g_stopped = true;
+    {
+        std::lock_guard l(g_queriesLock);
+        g_alive = false;  // no new providers or queries from here on (both re-check it under a lock)
+    }
     StopPipe();  // pipe clients unregister their providers as they disconnect
     std::vector<UINT64> hs;
     for (auto& p : ProvidersSnapshot()) hs.push_back(p->handle);
@@ -521,7 +525,6 @@ void Wh_ModBeforeUninit() {
     std::vector<std::shared_ptr<Query>> qs;
     {
         std::lock_guard l(g_queriesLock);
-        g_alive = false;  // under this lock, so no query is added after the snapshot
         for (auto& [k, q] : g_queries) qs.push_back(q);
     }
     for (auto& q : qs) FinishQuery(q, L"unloading");
@@ -535,11 +538,11 @@ void Wh_ModUninit() {
     PoolClose();  // waits for every worker callback and timer
     {
         std::lock_guard l(g_subsLock);
-        g_subs.clear();
+        std::vector<ChangedSub>().swap(g_subs);  // frees the buffer too
     }
     {
         std::lock_guard l(g_providersLock);
-        g_providers.clear();
+        std::vector<std::shared_ptr<Provider>>().swap(g_providers);
     }
     {
         std::lock_guard l(g_queriesLock);
@@ -551,14 +554,15 @@ void Wh_ModUninit() {
     // doesn't, restart the composer rather than let the DLL unload under them. Search relaunches
     // it on next use.
     for (int i = 0; i < 40 && g_liveObjects > 0; i++) Sleep(50);
+    if (g_liveObjects == 0) Sleep(50);  // let the last Release return out of our code
     if (g_liveObjects > 0) {
-        LOG(L"Windows still holds %d of our objects; restarting the composer", g_liveObjects.load());
+        Wh_Log(L"Windows still holds %d of our objects; restarting the composer", g_liveObjects.load());
         TerminateProcess(GetCurrentProcess(), 0);
     }
     if (g_mtaCookie) CoDecrementMTAUsage(g_mtaCookie);
     g_mtaCookie = nullptr;
     g_started = false;
-    LOG(L"Search Menu Extensions stopped");
+    Wh_Log(L"Search Menu Extensions stopped");
 }
 
 void Wh_ModSettingsChanged() {
