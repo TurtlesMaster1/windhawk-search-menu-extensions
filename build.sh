@@ -6,7 +6,7 @@ python - <<'PY'
 head=open('src/head.cpp',encoding='utf-8').read()
 body=open('src/body.cpp',encoding='utf-8').read()
 abi=open('src/pal_abi_min.h',encoding='utf-8').read()
-body2=open('src/body2.cpp',encoding='utf-8').read()
+body2=open('src/body2.cpp',encoding='utf-8').read().replace('//@@BUILTINS@@',open('src/builtins.cpp',encoding='utf-8').read())
 open('search-menu-extensions.wh.cpp','w',encoding='utf-8',newline='\n').write(head+body.replace('//@@ABI@@',abi)+body2)
 PY
 CXX="/c/Program Files/Windhawk/Compiler/bin/clang++.exe"

@@ -1,6 +1,6 @@
 # Notes for coding agents
 
-This repo is a Windhawk library mod that injects items into the **new Windows 11 Insider
+This repo is a Windhawk mod (built-in search features plus a provider API) that injects items into the **new Windows 11 Insider
 "composer" search** (`shellhost.exe loadComponent SystemComposerControl`). Read `README.md`
 first; this file covers how to work on it safely.
 
@@ -8,7 +8,8 @@ first; this file covers how to work on it safely.
 
 - **Never edit `search-menu-extensions.wh.cpp` by hand.** It's generated. Edit `src/head.cpp`
   (Windhawk header, readme, settings), `src/body.cpp` (core) or `src/body2.cpp` (C API, pipe,
-  demo, lifetime), then run `./build.sh` (Git Bash). `//@@ABI@@` in `body.cpp` is replaced by
+  demo, lifetime) or `src/builtins.cpp` (calculator, units, kill process, custom commands; spliced
+  into `body2.cpp` at `//@@BUILTINS@@`), then run `./build.sh` (Git Bash). `//@@ABI@@` in `body.cpp` is replaced by
   `src/pal_abi_min.h`.
 - `./build.sh` builds three things into `out/`: `mod.dll` (real Windhawk flags, proves the mod
   compiles), the standalone test DLL `wse-test.dll`, and `inject.exe`.
@@ -39,6 +40,9 @@ inject `out/neuter.dll` first (`restart-inject.ps1 -dlls <neuter.dll>,<wse-test.
 that copy's exported `Wh_ModUninit` in the test composer only. Hooks are applied after injection, so
 if the log says "raising PaletteCatalog.Changed to 1 subscribers" Windows subscribed before the
 hooks: live registration won't show up, so restart-inject again until it says 2.
+
+The UIA script types into the real search box. Don't run it while the user is at the machine:
+their typing and the script's collide and the results look random.
 
 1. `./build.sh test`
 2. Open the new search once so the composer process exists, then run

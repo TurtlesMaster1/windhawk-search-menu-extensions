@@ -28,8 +28,24 @@ static void TestLog(const wchar_t* fmt, ...) {
 static int Wh_GetIntSetting(const wchar_t* name) {
     if (!wcscmp(name, L"queryTimeoutMs")) return 2500;
     if (!wcscmp(name, L"restartIfLate")) return 0;  // the harness injects late on purpose
-    return 1;  // demoProvider, pipeServer
+    return 1;  // the providers, pipeServer
 }
+static const wchar_t* Wh_GetStringSetting(const wchar_t* fmt, ...) {
+    wchar_t name[128];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnwprintf(name, 127, fmt, ap);
+    va_end(ap);
+    name[127] = 0;
+    if (!wcscmp(name, L"commands[0].keyword")) return L"g";
+    if (!wcscmp(name, L"commands[0].title")) return L"Search Google for {query}";
+    if (!wcscmp(name, L"commands[0].command")) return L"https://www.google.com/search?q={query}";
+    if (!wcscmp(name, L"commands[1].keyword")) return L"np";
+    if (!wcscmp(name, L"commands[1].title")) return L"Notepad";
+    if (!wcscmp(name, L"commands[1].command")) return L"notepad.exe";
+    return L"";
+}
+static void Wh_FreeStringSetting(const wchar_t*) {}
 
 // Wh_SetFunctionHook stand-in. With no engine to patch code, it patches every pointer to the
 // target found in OSClient.API.dll's non-executable sections (its vtables). The "original" is

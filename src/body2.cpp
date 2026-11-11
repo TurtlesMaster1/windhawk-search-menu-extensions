@@ -450,15 +450,33 @@ static void UnregisterDemo() {
     if (UINT64 h = g_demo.exchange(0)) UnregisterProvider(h);
 }
 
+//@@BUILTINS@@
 // ---------------------------------------------------------------------------
 // Lifetime
 // ---------------------------------------------------------------------------
 static void LoadSettings() {
+    g_settings.calculator = Wh_GetIntSetting(L"calculator") != 0;
+    g_settings.killProcess = Wh_GetIntSetting(L"killProcess") != 0;
+    LoadCommands();
     g_settings.demoProvider = Wh_GetIntSetting(L"demoProvider") != 0;
     g_settings.pipeServer = Wh_GetIntSetting(L"pipeServer") != 0;
     g_settings.queryTimeoutMs = Wh_GetIntSetting(L"queryTimeoutMs");
     if (g_settings.queryTimeoutMs < 100 || g_settings.queryTimeoutMs > 60000) g_settings.queryTimeoutMs = 2500;
     g_settings.restartIfLate = Wh_GetIntSetting(L"restartIfLate") != 0;
+}
+
+// Registers or removes the built-in providers to match the settings.
+static void SyncProviders() {
+    SyncBuiltIn(g_calc, g_settings.calculator);
+    SyncBuiltIn(g_kill, g_settings.killProcess);
+    bool haveCommands;
+    {
+        std::lock_guard l(g_commandsLock);
+        haveCommands = !g_commands.empty();
+    }
+    SyncBuiltIn(g_custom, haveCommands);
+    if (g_settings.demoProvider) RegisterDemo();
+    else UnregisterDemo();
 }
 
 static bool IsComposerProcess() {
@@ -500,7 +518,7 @@ BOOL Wh_ModInit() {
     }
     g_changeTimer = PoolTimer(ChangeTimerCb, nullptr);
     bool lateLoad = GetModuleHandleW(L"RunUX.AOT.dll") != nullptr;
-    if (g_settings.demoProvider) RegisterDemo();
+    SyncProviders();
     if (g_settings.pipeServer) StartPipe();
     if (lateLoad && g_settings.restartIfLate)
         if (PTP_TIMER t = PoolTimer(LateLoadCheck, nullptr)) ArmTimer(t, 1500);
@@ -522,6 +540,9 @@ void Wh_ModBeforeUninit() {
     for (auto& p : ProvidersSnapshot()) hs.push_back(p->handle);
     for (auto h : hs) UnregisterProvider(h, true);  // in-process clients get onDetach
     g_demo = 0;
+    g_calc.handle = 0;
+    g_kill.handle = 0;
+    g_custom.handle = 0;
     std::vector<std::shared_ptr<Query>> qs;
     {
         std::lock_guard l(g_queriesLock);
@@ -548,6 +569,10 @@ void Wh_ModUninit() {
         std::lock_guard l(g_queriesLock);
         g_queries.clear();
     }
+    {
+        std::lock_guard l(g_commandsLock);
+        std::vector<CustomCommand>().swap(g_commands);
+    }
     ReleaseFactories();
     // Windows may still hold objects whose code lives in this DLL (definitions, items' delegates,
     // finished async operations). Give it a moment to drop them after the Changed event; if it
@@ -566,11 +591,10 @@ void Wh_ModUninit() {
 }
 
 void Wh_ModSettingsChanged() {
-    bool oldDemo = g_settings.demoProvider, oldPipe = g_settings.pipeServer;
+    bool oldPipe = g_settings.pipeServer;
     LoadSettings();
     if (!g_started || g_stopped) return;
-    if (g_settings.demoProvider && !oldDemo) RegisterDemo();
-    if (!g_settings.demoProvider && oldDemo) UnregisterDemo();
+    SyncProviders();
     if (g_settings.pipeServer && !oldPipe) StartPipe();
     if (!g_settings.pipeServer && oldPipe) StopPipe();
 }

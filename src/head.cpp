@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              search-menu-extensions
-// @name            New Windows Search Extensions (library)
-// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic Start/taskbar search. Lets other mods, scripts and programs add results, actions, toggles and cards, mixed in with the native results
+// @name            New Windows Search Extensions
+// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic Start/taskbar search. Adds a calculator, unit converter, "kill <process>" and your own keyword commands and web searches to the results. Other mods and scripts can add results too
 // @version         0.1.0
 // @author          TurtlesMaster1
 // @github          https://github.com/TurtlesMaster1
@@ -15,7 +15,7 @@
 > **Updated for Build 26320.9876 (Windows 11 Insider Beta).** Insider builds
 > change quickly, so newer builds may break or move this.
 
-# New Windows Search Extensions (library)
+# New Windows Search Extensions
 
 **This is only for the NEW Windows search**: the compact "composer" search box
 on recent Windows 11 Insider builds (hosted by
@@ -24,12 +24,31 @@ actions like "Turn on dark mode" and the volume slider). It does **nothing** for
 the classic Start menu search, the old taskbar search flyout (`SearchHost.exe`)
 or Windows 10.
 
-![Demo provider items mixed into the new Windows search](https://raw.githubusercontent.com/TurtlesMaster1/windhawk-search-menu-extensions/main/images/demo.png)
+Adds new kinds of results to the new search box, mixed in with the native ones:
 
-A **dependency mod**: on its own it only adds an optional demo provider (type
-`wh hello` to see an echo/copy item, a toggle, a "run" item and a card). Other mods (or any program/script) use it to put items into the new
-search box. Providers see every query and decide for themselves when to answer,
-so no prefix is needed.
+* **Calculator**: type `12*7.5`, `(3+4)^2`, `sqrt(2)`, `200 * 15%`, `50 + 10%` and press
+  Enter to copy the result. Supports `+ - * / ^ %`, brackets, `pi`, `e` and
+  `sqrt cbrt abs sin cos tan asin acos atan ln log log2 exp round floor ceil`.
+* **Unit converter**: `5 km in mi`, `72 f to c`, `1.5 gb in mb`, `3 cups to ml`.
+  Length, weight, volume, time, speed, data size and temperature.
+* **Kill process**: `kill note` lists running processes whose name contains
+  "note" with their memory use; Enter ends the selected one. `kill` on its own
+  lists the biggest processes.
+* **Custom commands**: your own keywords, set in the mod settings. A keyword can
+  open a program, file, folder or URL. Put `{query}` in the command to pass on
+  what you type after the keyword: with the default `g` command, `g windhawk`
+  searches Google for "windhawk".
+
+Each one can be turned off in the settings.
+
+## For developers: add your own results
+
+Other mods, and any program or script, can put items into the new search box
+through this mod. Providers see every query and decide for themselves when to
+answer, so no prefix is needed. The **Demo provider** setting adds sample items
+(type `wh hello`: an echo/copy item, a toggle, a "run" item and a card).
+
+![Demo provider items mixed into the new Windows search](https://raw.githubusercontent.com/TurtlesMaster1/windhawk-search-menu-extensions/main/images/demo.png)
 
 ![A pipe client showing live weather with an Adaptive Card](https://raw.githubusercontent.com/TurtlesMaster1/windhawk-search-menu-extensions/main/images/weather.png)
 
@@ -39,15 +58,15 @@ the named pipe.*
 Items are injected as genuine native search providers. Windows' own search is
 built from *Palette extensions* (`Windows.UI.Palettes`): Apps, Files, Settings,
 Windows Actions, Command Line and so on are each one extension. This mod adds
-one more extension per registered provider, so your items are real
-`PaletteItem`s. They mix into the native list with native ranking, keyboard
+one more extension per provider (the built-in ones included), so the items are
+real `PaletteItem`s. They mix into the native list with native ranking, keyboard
 navigation, icons, toggles and Adaptive Card content.
 
 ## Two ways to provide items
 
 ### 1. From another Windhawk mod (in-process)
 
-Your mod must also `@include shellhost.exe`. Find this library's DLL and call its
+Your mod must also `@include shellhost.exe`. Find this mod's DLL and call its
 exported C API (Windhawk exports every symbol of a mod DLL):
 
 ```cpp
@@ -92,8 +111,8 @@ session id of your process, e.g. `ProcessIdToSessionId`) and exchange
 number of providers. They're removed automatically when the connection closes.
 
 Only processes running as the same user can open the pipe. Any of them can
-register a provider, and a provider sees the text typed into search. Turn off
-**Named pipe API** if you don't use it.
+register a provider, and a provider sees the text typed into search. That's
+why the **Named pipe API** setting is off by default: turn it on to use the pipe.
 
 Client to library:
 
@@ -182,12 +201,37 @@ Library to client:
 
 // ==WindhawkModSettings==
 /*
-- demoProvider: true
-  $name: Demo provider
-  $description: Adds sample items when you type "wh" (echo, toggle, card, run). Handy to check the library works.
-- pipeServer: true
+- calculator: true
+  $name: Calculator and unit converter
+  $description: Type a sum ("12*7.5", "sqrt(2)") or a conversion ("5 km in mi", "72 f to c"). Enter copies the result
+- killProcess: true
+  $name: Kill process
+  $description: Type "kill" and part of a process name. Enter ends the selected process
+- commands:
+  - - keyword: g
+      $name: Keyword
+      $description: What to type in search
+    - title: Search Google for {query}
+      $name: Title
+      $description: Shown in the results
+    - command: https://www.google.com/search?q={query}
+      $name: Program, file, folder or URL
+      $description: "{query}" is replaced by the text typed after the keyword
+    - args: ""
+      $name: Arguments
+      $description: Optional, for programs. Can contain {query} too
+  - - keyword: yt
+    - title: Search YouTube for {query}
+    - command: https://www.youtube.com/results?search_query={query}
+    - args: ""
+  $name: Custom commands
+  $description: Your own keywords. Without {query}, the command also shows up when you type the start of the keyword or part of the title
+- demoProvider: false
+  $name: Demo provider (for developers)
+  $description: Adds sample items when you type "wh" (echo, toggle, card, run). Handy to check the API works.
+- pipeServer: false
   $name: Named pipe API
-  $description: Let other processes and scripts (same user only) add items through \\.\pipe\WindhawkSearchExtensions-<session id>
+  $description: For developers. Let other processes and scripts (same user only) add items through \\.\pipe\WindhawkSearchExtensions-<session id>
 - queryTimeoutMs: 2500
   $name: Provider timeout (ms)
   $description: How long to wait for a provider's results before showing what it has so far

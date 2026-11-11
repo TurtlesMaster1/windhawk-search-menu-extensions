@@ -6,8 +6,12 @@
 #include <shellapi.h>
 #include <shlwapi.h>
 #include <sddl.h>
+#include <psapi.h>
+#include <tlhelp32.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <map>
@@ -35,8 +39,10 @@ namespace wfc = winrt::Windows::Foundation::Collections;
 namespace wdj = winrt::Windows::Data::Json;
 
 struct Settings {
-    bool demoProvider = true;
-    bool pipeServer = true;
+    bool calculator = true;
+    bool killProcess = true;
+    bool demoProvider = false;
+    bool pipeServer = false;
     int queryTimeoutMs = 2500;
     bool restartIfLate = true;
 } g_settings;

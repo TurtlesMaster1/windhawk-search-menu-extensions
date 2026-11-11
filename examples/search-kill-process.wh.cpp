@@ -13,7 +13,8 @@
 /*
 # Search: kill process
 
-Needs the **New Windows Search Extensions (library)** mod.
+Needs the **New Windows Search Extensions** mod. That mod now has its own "kill" feature
+(turn it off there to avoid double rows); this file stays as a small API example.
 
 Type `kill note` in the new search box. Each running process whose name matches
 shows up with its PID and memory use. Press Enter on a row to end that process.
