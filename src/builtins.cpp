@@ -256,25 +256,32 @@ static void CalcQuery(UINT64 q, std::wstring const& text) {
                   TRUE);
 }
 
-// "kill <part of a process name>": Enter ends that process.
+static ULONGLONG ProcessCreated(HANDLE h) {
+    FILETIME c{}, e, k, u;
+    return GetProcessTimes(h, &c, &e, &k, &u) ? ((ULONGLONG)c.dwHighDateTime << 32) | c.dwLowDateTime : 0;
+}
+
+// "kill <part of a process name>": Enter ends that process. Nothing is listed until a name is
+// typed, so "kill" + Enter can't end something by accident.
 static void KillQuery(UINT64 q, std::wstring const& text) {
     std::wstring t = Lower(Trim(text));
-    if (t.rfind(L"kill", 0) != 0 || (t.size() > 4 && t[4] != L' ')) {
+    std::wstring filter = t.rfind(L"kill ", 0) == 0 ? Trim(t.substr(5)) : L"";
+    if (filter.empty()) {
         SubmitResults(q, L"[]", TRUE);
         return;
     }
-    std::wstring filter = Trim(t.substr(4));
-    struct Proc { DWORD pid; std::wstring name, path; SIZE_T mem; };
+    struct Proc { DWORD pid; ULONGLONG created; std::wstring name, path; SIZE_T mem; };
     std::vector<Proc> procs;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W pe{sizeof(pe)};
         for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
             if (pe.th32ProcessID <= 4) continue;
-            if (!filter.empty() && !StrStrIW(pe.szExeFile, filter.c_str())) continue;
-            HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
-            if (!h) continue;  // not ours to end either
-            Proc p{pe.th32ProcessID, pe.szExeFile, L"", 0};
+            if (!StrStrIW(pe.szExeFile, filter.c_str())) continue;
+            // Only list what we could actually end.
+            HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!h) continue;
+            Proc p{pe.th32ProcessID, ProcessCreated(h), pe.szExeFile, L"", 0};
             PROCESS_MEMORY_COUNTERS pmc{sizeof(pmc)};
             if (K32GetProcessMemoryInfo(h, &pmc, sizeof(pmc))) p.mem = pmc.WorkingSetSize;
             wchar_t path[MAX_PATH];
@@ -293,7 +300,7 @@ static void KillQuery(UINT64 q, std::wstring const& text) {
         wchar_t sub[128];
         swprintf(sub, 128, L"PID %lu \u00b7 %.0f MB \u00b7 Enter to end it", p.pid, p.mem / 1048576.0);
         if (json.size() > 1) json += L",";
-        json += L"{\"id\":\"" + std::to_wstring(p.pid) + L"\",\"title\":" + JsonEscape(L"End " + p.name) +
+        json += L"{\"id\":\"" + std::to_wstring(p.pid) + L":" + std::to_wstring(p.created) + L"\",\"title\":" + JsonEscape(L"End " + p.name) +
                 L",\"subtitle\":" + JsonEscape(sub) + L",\"icon\":" +
                 (p.path.empty() ? std::wstring(L"{\"glyph\":\"\\uE71A\"}") : L"{\"path\":" + JsonEscape(p.path) + L"}") +
                 L",\"score\":" + Num(score, 3) + L"}";
@@ -301,20 +308,25 @@ static void KillQuery(UINT64 q, std::wstring const& text) {
     }
     SubmitResults(q, json + L"]", TRUE);
 }
+// The id is "<pid>:<creation time>": PIDs are reused, so make sure it's still the listed process.
 static void KillInvoke(std::wstring const& item) {
-    DWORD pid = wcstoul(item.c_str(), nullptr, 10);
-    if (pid <= 4) return;
-    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-    BOOL ok = h && TerminateProcess(h, 1);
-    if (h) CloseHandle(h);
-    Wh_Log(L"kill %lu: %s", pid, ok ? L"ok" : L"failed");
+    wchar_t* end = nullptr;
+    DWORD pid = wcstoul(item.c_str(), &end, 10);
+    ULONGLONG created = end && *end == L':' ? wcstoull(end + 1, nullptr, 10) : 0;
+    if (pid <= 4 || !created) return;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!h) return;
+    bool same = ProcessCreated(h) == created;
+    BOOL ok = same && TerminateProcess(h, 1);
+    CloseHandle(h);
+    Wh_Log(L"kill %lu: %s", pid, ok ? L"ok" : same ? L"failed" : L"process changed");
 }
 
 // Custom commands from the settings: keyword -> program, file or URL. "{query}" stands for
 // whatever is typed after the keyword.
 struct CustomCommand { std::wstring keyword, title, command, args; };
 static std::mutex g_commandsLock;
-[[clang::no_destroy]] static std::vector<CustomCommand> g_commands;
+static std::vector<CustomCommand> g_commands;  // plain strings
 
 static std::wstring UrlEncode(std::wstring const& s) {
     int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0, nullptr, nullptr);
@@ -344,15 +356,16 @@ static void CommandsQuery(UINT64 q, std::wstring const& text) {
         auto& c = cmds[i];
         std::wstring kw = Lower(c.keyword), rest;
         if (HasQuery(c.command) || HasQuery(c.args)) {
-            // "g cats": the keyword, then the text to pass on
-            if (lt != kw && lt.rfind(kw + L" ", 0) != 0) continue;
+            // "g cats": the keyword, then the text to pass on. The bare keyword shows nothing.
+            if (lt.rfind(kw + L" ", 0) != 0) continue;
             rest = Trim(t.substr(kw.size()));
+            if (rest.empty()) continue;
         } else if (lt != kw && (lt.size() < 2 || (kw.rfind(lt, 0) != 0 && !StrStrIW(c.title.c_str(), lt.c_str())))) {
             continue;
         }
         bool url = c.command.find(L"://") != std::wstring::npos;
         std::wstring command = FillQuery(c.command, url ? UrlEncode(rest) : rest), args = FillQuery(c.args, rest);
-        std::wstring title = FillQuery(c.title.empty() ? c.command : c.title, rest.empty() ? std::wstring(L"\u2026") : rest);
+        std::wstring title = FillQuery(c.title.empty() ? c.command : c.title, rest);
         if (json.size() > 1) json += L",";
         json += L"{\"id\":\"c" + std::to_wstring(i) + L"\",\"title\":" + JsonEscape(title) + L",\"subtitle\":" +
                 JsonEscape(args.empty() ? command : command + L" " + args) + L",\"icon\":{\"glyph\":\"" +
@@ -364,7 +377,7 @@ static void CommandsQuery(UINT64 q, std::wstring const& text) {
 
 static std::wstring StringSetting(const wchar_t* fmt, int i) {
     PCWSTR s = Wh_GetStringSetting(fmt, i);
-    std::wstring r = s ? s : L"";
+    std::wstring r = s;
     Wh_FreeStringSetting(s);
     return r;
 }

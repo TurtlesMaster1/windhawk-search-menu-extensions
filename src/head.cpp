@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              search-menu-extensions
 // @name            New Windows Search Extensions
-// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic Start/taskbar search. Adds a calculator, unit converter, "kill <process>" and your own keyword commands and web searches to the results. Other mods and scripts can add results too
+// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic search. Adds a calculator, unit converter, "kill <process>" and custom keyword commands. Other mods and scripts can add results too
 // @version         0.1.0
 // @author          TurtlesMaster1
 // @github          https://github.com/TurtlesMaster1
@@ -31,13 +31,15 @@ Adds new kinds of results to the new search box, mixed in with the native ones:
   `sqrt cbrt abs sin cos tan asin acos atan ln log log2 exp round floor ceil`.
 * **Unit converter**: `5 km in mi`, `72 f to c`, `1.5 gb in mb`, `3 cups to ml`.
   Length, weight, volume, time, speed, data size and temperature.
-* **Kill process**: `kill note` lists running processes whose name contains
-  "note" with their memory use; Enter ends the selected one. `kill` on its own
-  lists the biggest processes.
+* **Kill process**: `kill note` lists the running processes whose name contains
+  "note", with their memory use; Enter ends the selected one. It's ended at
+  once, like "End task" in Task Manager, so unsaved work in it is lost. Only
+  processes you're allowed to end are listed.
 * **Custom commands**: your own keywords, set in the mod settings. A keyword can
   open a program, file, folder or URL. Put `{query}` in the command to pass on
   what you type after the keyword: with the default `g` command, `g windhawk`
-  searches Google for "windhawk".
+  searches Google for "windhawk". Such a command shows up once you've typed
+  something after the keyword.
 
 Each one can be turned off in the settings.
 
@@ -183,7 +185,7 @@ Library to client:
   next time you open search. Providers registered later (other mods, pipe
   clients) are picked up live.
 * When the mod is disabled or updated, Windows may still hold some of its
-  objects (items it's showing, finished queries). The library then restarts the
+  objects (items it's showing, finished queries). The mod then restarts the
   composer instead of unloading under them; search reopens normally next time.
 * **Card buttons:** cards render under the selected row and you can update them
   live (`WSE_UpdateCard` / `updateCard`). But Windows ignores Action.Submit
@@ -206,7 +208,7 @@ Library to client:
   $description: Type a sum ("12*7.5", "sqrt(2)") or a conversion ("5 km in mi", "72 f to c"). Enter copies the result
 - killProcess: true
   $name: Kill process
-  $description: Type "kill" and part of a process name. Enter ends the selected process
+  $description: Type "kill" and part of a process name. Enter ends the selected process at once, without asking it to save
 - commands:
   - - keyword: g
       $name: Keyword
@@ -216,7 +218,7 @@ Library to client:
       $description: Shown in the results
     - command: https://www.google.com/search?q={query}
       $name: Program, file, folder or URL
-      $description: "{query}" is replaced by the text typed after the keyword
+      $description: Put {query} where the text typed after the keyword should go
     - args: ""
       $name: Arguments
       $description: Optional, for programs. Can contain {query} too

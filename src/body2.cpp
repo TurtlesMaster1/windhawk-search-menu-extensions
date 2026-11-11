@@ -78,6 +78,21 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
     std::map<std::wstring, UINT64> providers;  // id -> handle
     std::atomic<bool> closed{false};
 
+    // Query handles are shared by all providers: only accept results for this client's own.
+    bool OwnsQuery(UINT64 qh) {
+        std::shared_ptr<Provider> p;
+        {
+            std::lock_guard l(g_queriesLock);
+            auto it = g_queries.find(qh);
+            if (it != g_queries.end()) p = it->second->provider.lock();
+        }
+        if (!p) return false;
+        std::lock_guard l(provLock);
+        for (auto& [id, h] : providers)
+            if (h == p->handle) return true;
+        return false;
+    }
+
     void Send(wdj::JsonObject const& o) {
         if (closed) return;
         std::string line = ToUtf8(std::wstring(o.Stringify())) + "\n";
@@ -177,7 +192,8 @@ struct PipeClient : std::enable_shared_from_this<PipeClient> {
             UINT64 q = _wcstoui64(JStr(o, L"queryId").c_str(), nullptr, 10);
             bool done = !o.HasKey(L"done") || o.GetNamedValue(L"done").ValueType() != wdj::JsonValueType::Boolean ||
                         o.GetNamedBoolean(L"done");
-            SubmitResults(q, ItemsOf(o), done);
+            if (OwnsQuery(q)) SubmitResults(q, ItemsOf(o), done);
+            else Error(L"unknown query");
         } else if (op == L"setItems") {
             if (UINT64 h = Lookup(o)) SetStaticItems(h, ItemsOf(o));
             else Error(L"unknown provider");
@@ -568,10 +584,6 @@ void Wh_ModUninit() {
     {
         std::lock_guard l(g_queriesLock);
         g_queries.clear();
-    }
-    {
-        std::lock_guard l(g_commandsLock);
-        std::vector<CustomCommand>().swap(g_commands);
     }
     ReleaseFactories();
     // Windows may still hold objects whose code lives in this DLL (definitions, items' delegates,
