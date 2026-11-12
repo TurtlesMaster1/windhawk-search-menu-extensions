@@ -14,7 +14,7 @@ static std::wstring Trim(std::wstring const& s) {
 static std::wstring Num(double v, int sig) {
     if (v == 0) v = 0;  // no "-0"
     wchar_t b[64];
-    if (v == std::floor(v) && std::fabs(v) < 1e15)
+    if (v == std::floor(v) && std::fabs(v) <= 9007199254740992.0)  // whole numbers up to 2^53 in full
         swprintf(b, 64, L"%.0f", v);
     else
         swprintf(b, 64, L"%.*g", sig, v);
@@ -27,51 +27,73 @@ struct Calc {
     bool ok = true;
     int ops = 0;    // operators and function calls seen; 0 means it was just a number
     int depth = 0;
-    bool percent = false;  // the term just parsed was a plain "N%"
+    bool pct = false;      // the operand just parsed was a postfix "N%"
+    bool termPct = false;  // the term just parsed was a single "N%"
 
     void Ws() { while (*p == L' ') p++; }
     static bool StartsOperand(wchar_t c) { return iswalnum(c) || c == L'(' || c == L'.'; }
+    // A "%" that isn't followed by another operand is a postfix percent ("10 % 3" is a remainder).
+    bool PostfixPercent() {
+        const wchar_t* s = p;
+        while (*s == L' ') s++;
+        if (*s != L'%') return false;
+        const wchar_t* after = s + 1;
+        while (*after == L' ') after++;
+        if (StartsOperand(*after)) return false;
+        p = s + 1;
+        ops++;
+        return true;
+    }
+    // "50 + 10%" is 55: a percentage on the right takes that share of the left side, like a pocket
+    // calculator, unless the left side is a percentage too ("20% + 5%" is 0.25, not 0.21).
     double Expr() {
         double v = Term();
+        bool lhsPct = termPct;
+        double mag = 0;
         for (;;) {
             Ws();
             bool minus = *p == L'-' || *p == 0x2212;
             if (*p != L'+' && !minus) return v;
             p++; ops++;
             double t = Term();
-            if (percent) t *= v;  // "50 + 10%" is 55, like a pocket calculator
-            v = minus ? v - t : v + t;
+            bool tp = termPct;
+            if (tp && !lhsPct) t *= v;
+            double nv = minus ? v - t : v + t;
+            // A sum that cancels ("45.30-20.10-25.20") leaves binary noise: snap it to 0. The threshold
+            // is relative to the largest operand so far, so a real small result isn't touched.
+            mag = std::max({mag, std::fabs(v), std::fabs(t)});
+            if (std::fabs(nv) < mag * 1e-13 && std::fabs(nv) < std::max(std::fabs(v), std::fabs(t)) * 1e-3) nv = 0;
+            v = nv;
+            lhsPct = lhsPct && tp;
         }
     }
     double Term() {
         double v = Unary();
-        percent = false;
-        for (int n = 0;; n++) {
+        termPct = pct;
+        for (;;) {
             Ws();
             wchar_t c = *p;
-            if (c == L'*' || c == 0xD7) { p++; ops++; v *= Unary(); percent = false; }
-            else if (c == L'/' || c == 0xF7) { p++; ops++; v /= Unary(); percent = false; }
-            else if (c == L'%') {
-                p++; ops++;
-                const wchar_t* s = p;
-                while (*s == L' ') s++;
-                if (StartsOperand(*s)) { v = std::fmod(v, Unary()); percent = false; }  // "10 % 3"
-                else { v /= 100; percent = n == 0; }               // "15%"
-            } else return v;
+            if (c == L'*' || c == 0xD7) { p++; ops++; v *= Unary(); termPct = false; }
+            else if (c == L'/' || c == 0xF7) { p++; ops++; v /= Unary(); termPct = false; }
+            else if (c == L'%') { p++; ops++; v = std::fmod(v, Unary()); termPct = false; }  // "10 % 3"
+            else return v;
         }
     }
     double Unary() {
         Ws();
         if (++depth > 64) { ok = false; return 0; }
         double v;
-        if (*p == L'-' || *p == 0x2212) { p++; v = -Unary(); }
-        else if (*p == L'+') { p++; v = Unary(); }
+        bool isPct = false;
+        if (*p == L'-' || *p == 0x2212) { p++; v = -Unary(); isPct = pct; }
+        else if (*p == L'+') { p++; v = Unary(); isPct = pct; }
         else {
             v = Primary();
+            if (PostfixPercent()) { v /= 100; isPct = true; }  // binds to this operand, before ^ * /
             Ws();
-            if (*p == L'^') { p++; ops++; v = std::pow(v, Unary()); }
+            if (*p == L'^') { p++; ops++; v = std::pow(v, Unary()); isPct = false; }
         }
         depth--;
+        pct = isPct;
         return v;
     }
     double Primary() {
@@ -144,15 +166,15 @@ static const Unit kUnits[] = {
     {L"mm millimeter millimeters millimetre millimetres", 'L', 0.001},
     {L"cm centimeter centimeters centimetre centimetres", 'L', 0.01},
     {L"m meter meters metre metres", 'L', 1},
-    {L"km kilometer kilometers kilometre kilometres", 'L', 1000},
+    {L"km kilometer kilometers kilometre kilometres kms", 'L', 1000},
     {L"in inch inches \"", 'L', 0.0254},
     {L"ft foot feet '", 'L', 0.3048},
-    {L"yd yard yards", 'L', 0.9144},
+    {L"yd yard yards yds", 'L', 0.9144},
     {L"mi mile miles", 'L', 1609.344},
     {L"nmi", 'L', 1852},
     {L"mg milligram milligrams", 'M', 1e-6},
     {L"g gram grams", 'M', 0.001},
-    {L"kg kilogram kilograms kilo kilos", 'M', 1},
+    {L"kg kilogram kilograms kilo kilos kgs", 'M', 1},
     {L"t tonne tonnes", 'M', 1000},
     {L"oz ounce ounces", 'M', 0.028349523125},
     {L"lb lbs pound pounds", 'M', 0.45359237},
@@ -162,7 +184,7 @@ static const Unit kUnits[] = {
     {L"tsp teaspoon teaspoons", 'V', 0.00492892159375},
     {L"tbsp tablespoon tablespoons", 'V', 0.01478676478125},
     {L"floz", 'V', 0.0295735295625},
-    {L"cups cup", 'V', 0.2365882365},
+    {L"cup cups", 'V', 0.2365882365},
     {L"pt pint pints", 'V', 0.473176473},
     {L"qt quart quarts", 'V', 0.946352946},
     {L"gal gallon gallons", 'V', 3.785411784},
@@ -171,31 +193,39 @@ static const Unit kUnits[] = {
     {L"min mins minute minutes", 'D', 60},
     {L"h hr hrs hour hours", 'D', 3600},
     {L"d day days", 'D', 86400},
-    {L"wk week weeks", 'D', 604800},
-    {L"yr year years", 'D', 31557600},
+    {L"wk week weeks wks", 'D', 604800},
+    {L"yr year years yrs", 'D', 31557600},
     {L"m/s", 'S', 1},
-    {L"km/h kmh kph", 'S', 1 / 3.6},
+    {L"km/h kmh kph km/hr", 'S', 1 / 3.6},
     {L"mph", 'S', 0.44704},
     {L"kn knot knots", 'S', 1852.0 / 3600},
     {L"ft/s", 'S', 0.3048},
-    {L"bit bits", 'B', 0.125},
+    // Bytes are binary, as File Explorer shows them (1 MB = 1048576 bytes). Bits are decimal (1 Mb =
+    // 1000000 bits). The byte rows come first, so "mb" still means megabytes while "Mb" is megabits.
     {L"B byte bytes", 'B', 1},
-    {L"KB", 'B', 1024.0},
-    {L"MB", 'B', 1048576.0},
-    {L"GB", 'B', 1073741824.0},
-    {L"TB", 'B', 1099511627776.0},
-    {L"\u00b0C c celsius", 'T', 1},
-    {L"\u00b0F f fahrenheit", 'T', 2},
+    {L"KB kilobyte kilobytes", 'B', 1024.0},
+    {L"MB megabyte megabytes", 'B', 1048576.0},
+    {L"GB gigabyte gigabytes", 'B', 1073741824.0},
+    {L"TB terabyte terabytes", 'B', 1099511627776.0},
+    {L"bit b bits", 'B', 0.125},
+    {L"Kb kbit kbits kilobit kilobits", 'B', 125.0},
+    {L"Mb mbit mbits megabit megabits", 'B', 125000.0},
+    {L"Gb gbit gbits gigabit gigabits", 'B', 125000000.0},
+    {L"Tb tbit tbits terabit terabits", 'B', 125000000000.0},
+    {L"\u00b0C c celsius \u2103", 'T', 1},
+    {L"\u00b0F f fahrenheit \u2109", 'T', 2},
     {L"K kelvin", 'T', 3},
 };
 
-static const Unit* FindUnit(std::wstring const& name, std::wstring* shown) {
+// Exact case first, so "Mb" is megabits and "MB" megabytes; then any case, so "mb" or "KG" still work.
+static const Unit* FindUnitAs(std::wstring const& name, std::wstring* shown, bool exactCase) {
     for (auto& u : kUnits) {
         const wchar_t* s = u.names;
         while (*s) {
             const wchar_t* e = wcschr(s, L' ');
             size_t n = e ? (size_t)(e - s) : wcslen(s);
-            if (n == name.size() && !_wcsnicmp(s, name.c_str(), n)) {
+            bool same = n == name.size() && (exactCase ? !wcsncmp(s, name.c_str(), n) : !_wcsnicmp(s, name.c_str(), n));
+            if (same) {
                 const wchar_t* fe = wcschr(u.names, L' ');
                 *shown = fe ? std::wstring(u.names, fe) : std::wstring(u.names);
                 return &u;
@@ -206,14 +236,27 @@ static const Unit* FindUnit(std::wstring const& name, std::wstring* shown) {
     }
     return nullptr;
 }
+static const Unit* FindUnit(std::wstring const& name, std::wstring* shown) {
+    const Unit* u = FindUnitAs(name, shown, true);
+    return u ? u : FindUnitAs(name, shown, false);
+}
+
+// Replaces every case-insensitive occurrence of from (lowercase) with to.
+static void ReplaceCI(std::wstring& s, const wchar_t* from, const wchar_t* to) {
+    size_t n = wcslen(from), m = wcslen(to);
+    for (size_t i = Lower(s).find(from); i != std::wstring::npos; i = Lower(s).find(from, i + m)) s.replace(i, n, to);
+}
 
 // "<number or expression> <unit> to|in <unit>"
-static bool ConvertUnits(std::wstring const& text, std::wstring* title, std::wstring* value) {
-    std::wstring t = Lower(text);
+static bool ConvertUnits(std::wstring const& input, std::wstring* title, std::wstring* value) {
+    std::wstring text = input;
+    ReplaceCI(text, L"fl. oz", L"floz");  // "fl oz" is one unit
+    ReplaceCI(text, L"fl oz", L"floz");
+    std::wstring t = Lower(text);  // same length as text, so a position in t is a position in text
     size_t a = t.rfind(L" to "), b = t.rfind(L" in ");
     size_t pos = a == std::wstring::npos ? b : (b == std::wstring::npos ? a : std::max(a, b));
     if (pos == std::wstring::npos) return false;
-    std::wstring left = Trim(t.substr(0, pos)), toName = Trim(t.substr(pos + 4));
+    std::wstring left = Trim(text.substr(0, pos)), toName = Trim(text.substr(pos + 4));  // unit names keep their case
     size_t i = left.size();
     while (i > 0 && !iswdigit(left[i - 1]) && left[i - 1] != L')' && left[i - 1] != L'.' && left[i - 1] != L' ') i--;
     std::wstring fromName = left.substr(i), num = Trim(left.substr(0, i));
@@ -223,6 +266,8 @@ static bool ConvertUnits(std::wstring const& text, std::wstring* title, std::wst
     const Unit* to = FindUnit(toName, &toShown);
     double x;
     if (!from || !to || from->cat != to->cat || !Evaluate(num, false, &x)) return false;
+    if (fromShown == L"floz") fromShown = L"fl oz";
+    if (toShown == L"floz") toShown = L"fl oz";
     double y;
     if (from->cat == 'T') {
         double k = from->f == 1 ? x + 273.15 : from->f == 2 ? (x - 32) * 5 / 9 + 273.15 : x;
@@ -231,17 +276,38 @@ static bool ConvertUnits(std::wstring const& text, std::wstring* title, std::wst
     } else {
         y = x * from->f / to->f;
     }
-    *value = Num(y, 6);
-    *title = Num(x, 10) + L" " + fromShown + L" = " + *value + L" " + toShown;
+    if (!std::isfinite(y)) return false;
+    *value = Num(y, 12);
+    *title = Num(x, 12) + L" " + fromShown + L" = " + *value + L" " + toShown;
     return true;
+}
+
+// Digit groups joined by - or /, like "2026-11-11", "11/10/2026", "555-123-4567" or "0800-123-456":
+// dates, phone numbers and IDs, not sums. Two or more separators, or a group with a leading zero.
+static bool IsDateLike(std::wstring const& t) {
+    size_t start = !t.empty() && t[0] == L'+' ? 1 : 0, seps = 0;
+    for (size_t k = start; k <= t.size(); k++) {
+        if (k == t.size() || t[k] == L'-' || t[k] == L'/') {
+            size_t len = k - start;
+            if (len == 0) return false;
+            if (len > 1 && t[start] == L'0') return true;
+            if (k < t.size()) seps++;
+            start = k + 1;
+        } else if (t[k] < L'0' || t[k] > L'9') {
+            return false;
+        }
+    }
+    return seps >= 2;
 }
 
 static void CalcQuery(UINT64 q, std::wstring const& text) {
     std::wstring t = Trim(text), title, value;
-    if (!t.empty() && t[0] == L'=') t = Trim(t.substr(1));
+    bool forced = !t.empty() && t[0] == L'=';  // "=2026-11-11" is always a sum
+    if (forced) t = Trim(t.substr(1));
+    if (!t.empty() && t.back() == L'=') t = Trim(t.substr(0, t.size() - 1));  // "1+1="
     double v;
     if (ConvertUnits(t, &title, &value)) {
-    } else if (Evaluate(t, true, &v)) {
+    } else if ((forced || !IsDateLike(t)) && Evaluate(t, true, &v)) {
         value = Num(v, 12);
         title = L"= " + value;
     } else {
@@ -261,27 +327,35 @@ static ULONGLONG ProcessCreated(HANDLE h) {
     return GetProcessTimes(h, &c, &e, &k, &u) ? ((ULONGLONG)c.dwHighDateTime << 32) | c.dwLowDateTime : 0;
 }
 
-// "kill <part of a process name>": Enter ends that process. Nothing is listed until a name is
-// typed, so "kill" + Enter can't end something by accident.
+// "kill <part of a process name>": Enter ends that process. Nothing is listed until two letters are
+// typed, so "kill" + Enter can't end something by accident, and "kill e" doesn't list half the machine.
 static void KillQuery(UINT64 q, std::wstring const& text) {
     std::wstring t = Lower(Trim(text));
     std::wstring filter = t.rfind(L"kill ", 0) == 0 ? Trim(t.substr(5)) : L"";
-    if (filter.empty()) {
+    if (filter.size() > 4 && filter.compare(filter.size() - 4, 4, L".exe") == 0) filter.resize(filter.size() - 4);
+    if (filter.size() < 2) {
         SubmitResults(q, L"[]", TRUE);
         return;
     }
-    struct Proc { DWORD pid; ULONGLONG created; std::wstring name, path; SIZE_T mem; };
+    struct Proc { DWORD pid; ULONGLONG created; std::wstring name, path; SIZE_T mem; int tier; };
     std::vector<Proc> procs;
+    DWORD self = GetCurrentProcessId();
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap != INVALID_HANDLE_VALUE) {
         PROCESSENTRY32W pe{sizeof(pe)};
         for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-            if (pe.th32ProcessID <= 4) continue;
-            if (!StrStrIW(pe.szExeFile, filter.c_str())) continue;
+            if (pe.th32ProcessID <= 4 || pe.th32ProcessID == self) continue;  // never the search host itself
+            // Match the name without ".exe", so "exe" or "." doesn't match every process.
+            std::wstring base = Lower(pe.szExeFile);
+            if (size_t dot = base.rfind(L'.'); dot != std::wstring::npos && dot > 0) base.resize(dot);
+            size_t at = base.find(filter);
+            if (at == std::wstring::npos) continue;
+            // The exact name first, then names that start with it, then matches after a separator.
+            int tier = base.size() == filter.size() ? 0 : at == 0 ? 1 : (wcschr(L"-_. ", base[at - 1]) ? 2 : 3);
             // Only list what we could actually end.
             HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
             if (!h) continue;
-            Proc p{pe.th32ProcessID, ProcessCreated(h), pe.szExeFile, L"", 0};
+            Proc p{pe.th32ProcessID, ProcessCreated(h), pe.szExeFile, L"", 0, tier};
             PROCESS_MEMORY_COUNTERS pmc{sizeof(pmc)};
             if (K32GetProcessMemoryInfo(h, &pmc, sizeof(pmc))) p.mem = pmc.WorkingSetSize;
             wchar_t path[MAX_PATH];
@@ -292,10 +366,12 @@ static void KillQuery(UINT64 q, std::wstring const& text) {
         }
         CloseHandle(snap);
     }
-    std::sort(procs.begin(), procs.end(), [](Proc const& a, Proc const& b) { return a.mem > b.mem; });
+    std::stable_sort(procs.begin(), procs.end(), [](Proc const& a, Proc const& b) {
+        return a.tier != b.tier ? a.tier < b.tier : a.mem > b.mem;  // the best name match first, then the biggest
+    });
     if (procs.size() > 8) procs.resize(8);
     std::wstring json = L"[";
-    double score = 0.9;  // biggest first
+    double score = 0.9;  // in that order
     for (auto& p : procs) {
         wchar_t sub[128];
         swprintf(sub, 128, L"PID %lu \u00b7 %.0f MB \u00b7 Enter to end it", p.pid, p.mem / 1048576.0);
@@ -313,7 +389,7 @@ static void KillInvoke(std::wstring const& item) {
     wchar_t* end = nullptr;
     DWORD pid = wcstoul(item.c_str(), &end, 10);
     ULONGLONG created = end && *end == L':' ? wcstoull(end + 1, nullptr, 10) : 0;
-    if (pid <= 4 || !created) return;
+    if (pid <= 4 || pid == GetCurrentProcessId() || !created) return;
     HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return;
     bool same = ProcessCreated(h) == created;
@@ -344,6 +420,16 @@ static std::wstring FillQuery(std::wstring s, std::wstring const& query) {
     return s;
 }
 static bool HasQuery(std::wstring const& s) { return s.find(L"{query}") != std::wstring::npos; }
+// {query} in the arguments goes in as typed, so several words are several arguments, as on a command
+// line (wrap it in quotes, "{query}", to keep them together). Inside a URL it is percent-encoded.
+static std::wstring FillArgs(std::wstring s, std::wstring const& query) {
+    for (size_t i = 0; (i = s.find(L"{query}", i)) != std::wstring::npos;) {
+        std::wstring with = s.substr(0, i).find(L"://") != std::wstring::npos ? UrlEncode(query) : query;
+        s.replace(i, 7, with);
+        i += with.size();
+    }
+    return s;
+}
 
 static void CommandsQuery(UINT64 q, std::wstring const& text) {
     std::wstring t = Trim(text), lt = Lower(t), json = L"[";
@@ -360,12 +446,14 @@ static void CommandsQuery(UINT64 q, std::wstring const& text) {
             if (lt.rfind(kw + L" ", 0) != 0) continue;
             rest = Trim(t.substr(kw.size()));
             if (rest.empty()) continue;
-        } else if (lt != kw && (lt.size() < 2 || (kw.rfind(lt, 0) != 0 && !StrStrIW(c.title.c_str(), lt.c_str())))) {
-            continue;
+        } else {
+            // No {query}: the keyword, or the start of it, or part of the title (its placeholder doesn't count).
+            std::wstring plainTitle = Lower(FillQuery(c.title, L""));
+            if (lt != kw && (lt.size() < 2 || (kw.rfind(lt, 0) != 0 && plainTitle.find(lt) == std::wstring::npos))) continue;
         }
         bool url = c.command.find(L"://") != std::wstring::npos;
-        std::wstring command = FillQuery(c.command, url ? UrlEncode(rest) : rest), args = FillQuery(c.args, rest);
-        std::wstring title = FillQuery(c.title.empty() ? c.command : c.title, rest);
+        std::wstring command = FillQuery(c.command, url ? UrlEncode(rest) : rest), args = FillArgs(c.args, rest);
+        std::wstring title = Trim(FillQuery(c.title.empty() ? c.command : c.title, rest));
         if (json.size() > 1) json += L",";
         json += L"{\"id\":\"c" + std::to_wstring(i) + L"\",\"title\":" + JsonEscape(title) + L",\"subtitle\":" +
                 JsonEscape(args.empty() ? command : command + L" " + args) + L",\"icon\":{\"glyph\":\"" +
@@ -383,10 +471,15 @@ static std::wstring StringSetting(const wchar_t* fmt, int i) {
 }
 static void LoadCommands() {
     std::vector<CustomCommand> cmds;
-    for (int i = 0; i < 200; i++) {
+    int blanks = 0;  // a cleared entry keeps its place in the settings list: skip it, and a long run ends the list
+    for (int i = 0; i < 200 && blanks < 16; i++) {
         CustomCommand c{Trim(StringSetting(L"commands[%d].keyword", i)), StringSetting(L"commands[%d].title", i),
                         Trim(StringSetting(L"commands[%d].command", i)), StringSetting(L"commands[%d].args", i)};
-        if (c.keyword.empty() && c.command.empty()) break;
+        if (c.keyword.empty() && c.command.empty()) {
+            blanks++;
+            continue;
+        }
+        blanks = 0;
         if (!c.keyword.empty() && !c.command.empty()) cmds.push_back(std::move(c));
     }
     std::lock_guard l(g_commandsLock);
