@@ -59,7 +59,7 @@ The built-in features are ordinary providers registered through the same interna
 - Card `Action.Submit` buttons don't call back in the inline preview (RunUX: "Slot previews do not support card actions").
 - Windows reads providers at composer start. If the mod is enabled late, it restarts the composer (setting `restartIfLate`).
 - Disabling or updating the mod usually restarts the composer too, because Windows keeps the items it showed.
-- The pipe (`\.\pipe\WindhawkSearchExtensions-<session id>`) accepts any process of the same user, and providers see what's typed into search.
+- The named pipe (`\\.\pipe\WindhawkSearchExtensions-<session id>`, off by default: turn on the **Named pipe API** setting) accepts any process of the same user, and providers see what's typed into search.
 
 ## License
 

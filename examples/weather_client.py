@@ -1,6 +1,7 @@
 """Example out-of-process provider for Search Menu Extensions.
 
 Type "weather <city>" in the new Windows search box. Uses wttr.in (no API key).
+First turn on the mod's "Named pipe API" setting (it is off by default).
 Run:  python weather_client.py
 """
 import json
@@ -25,11 +26,15 @@ PIPE = pipe_name()
 class Client:
     def __init__(self):
         # Retry until the composer (and the mod inside it) is up.
+        warned = False
         while True:
             try:
                 self.f = open(PIPE, 'r+b', buffering=0)
                 break
             except OSError:
+                if not warned:
+                    print('Waiting for %s. Is "Named pipe API" on in the mod settings? Open search once after that.' % PIPE)
+                    warned = True
                 time.sleep(2)
         self.lock = threading.Lock()
 

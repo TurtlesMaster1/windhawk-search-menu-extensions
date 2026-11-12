@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id              search-menu-extensions
 // @name            New Windows Search Extensions
-// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic search. Adds a calculator, unit converter, "kill <process>" and custom keyword commands. Other mods and scripts can add results too
+// @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic search. Adds a calculator, unit converter, "kill <process>" and custom keyword commands. Other mods, and scripts through the pipe, can add results too
 // @version         0.1.0
 // @author          TurtlesMaster1
 // @github          https://github.com/TurtlesMaster1
@@ -29,19 +29,29 @@ Adds new kinds of results to the new search box, mixed in with the native ones:
 * **Calculator**: type `12*7.5`, `(3+4)^2`, `sqrt(2)`, `200 * 15%`, `50 + 10%` and press
   Enter to copy the result. Supports `+ - * / ^ %`, brackets, `pi`, `e` and
   `sqrt cbrt abs sin cos tan asin acos atan ln log log2 exp round floor ceil`.
-* **Unit converter**: `5 km in mi`, `72 f to c`, `1.5 gb in mb`, `3 cups to ml`.
-  Length, weight, volume, time, speed, data size and temperature.
+  Trig works in radians (`sin(pi/6)` is 0.5). Dates and phone numbers with two or
+  more `-` or `/`, like `2026-11-11` or `555-123-4567`, aren't calculated; put `=`
+  in front to force a sum.
+* **Unit converter**: `5 km in mi`, `72 f to c`, `1.5 gb in mb`, `3 cups to ml`,
+  `8 fl oz in ml`. Length, weight, volume, time, speed, data size and temperature.
+  Volumes are US (a pint is 473 ml). KB, MB, GB and TB are binary (1 GB = 1024 MB),
+  as in File Explorer. Bits are decimal, so `100 Mb to MB` is 11.92 MB.
 * **Kill process**: `kill note` lists the running processes whose name contains
-  "note", with their memory use; Enter ends the selected one. It's ended at
-  once, like "End task" in Task Manager, so unsaved work in it is lost. Only
-  processes you're allowed to end are listed.
+  "note" (type at least two letters), with their memory use; Enter ends the
+  selected one. Exact name matches come first. It's ended at once, like "End task"
+  in Task Manager, so unsaved work in it is lost. The search box's own process is
+  never listed, and only processes you're allowed to end are.
 * **Custom commands**: your own keywords, set in the mod settings. A keyword can
   open a program, file, folder or URL. Put `{query}` in the command to pass on
   what you type after the keyword: with the default `g` command, `g windhawk`
   searches Google for "windhawk". Such a command shows up once you've typed
-  something after the keyword.
+  something after the keyword. In the arguments, `{query}` is passed as typed, so
+  wrap it in quotes (`"{query}"`) to keep several words together. Inside a URL it
+  is percent-encoded.
 
-Each one can be turned off in the settings.
+The calculator (with the unit converter) and kill process each have a switch in
+the settings. To drop a custom command, including the defaults `g` and `yt`,
+remove it from the Custom commands list.
 
 ## For developers: add your own results
 
@@ -82,7 +92,7 @@ typedef struct WSE_ProviderCallbacks {
     void (WINAPI* onInvoke)(void* ctx, PCWSTR itemId, PCWSTR actionId, PCWSTR dataJson, PCWSTR inputsJson);
     // Optional. Query abandoned (user typed more / closed search).
     void (WINAPI* onCancel)(void* ctx, UINT64 queryHandle);
-    // Optional. The library is unloading: drop the provider handle, don't call the API again.
+    // Optional. This mod is unloading: drop the provider handle, don't call the API again.
     void (WINAPI* onDetach)(void* ctx);
 } WSE_ProviderCallbacks;
 
@@ -95,12 +105,12 @@ BOOL   WINAPI WSE_NotifyChanged(UINT64 provider);                        // ask 
 BOOL   WINAPI WSE_UnregisterProvider(UINT64 provider);                   // waits for running callbacks
 ```
 
-Finding the library: enumerate the modules of the process and use the first one
+Finding this mod: enumerate the modules of the process and use the first one
 that exports `WSE_GetApiVersion`. Mods load in any order, so retry for a few
-seconds if it isn't there yet (and again later: the library can be disabled,
+seconds if it isn't there yet (and again later: this mod can be disabled,
 updated or re-enabled while your mod is running; `onDetach` tells you it's going).
 
-Callbacks run on the library's worker threads, never on Windows' own threads.
+Callbacks run on this mod's worker threads, never on Windows' own threads.
 Call `WSE_UnregisterProvider` in your `Wh_ModUninit`: it returns once none of
 your callbacks is running any more, so your DLL can unload safely. (Calling it
 from inside one of your own callbacks is fine too; it then waits for the others.)
@@ -116,7 +126,7 @@ Only processes running as the same user can open the pipe. Any of them can
 register a provider, and a provider sees the text typed into search. That's
 why the **Named pipe API** setting is off by default: turn it on to use the pipe.
 
-Client to library:
+Client to mod:
 
 ```json
 {"op":"register","provider":{"id":"weather","name":"Weather","glyph":"\uE706"}}
@@ -127,7 +137,7 @@ Client to library:
 {"op":"unregister","provider":"weather"}
 ```
 
-Library to client:
+Mod to client:
 
 ```json
 {"op":"registered","provider":"weather","extensionId":"Windhawk.weather"}
@@ -208,7 +218,7 @@ Library to client:
   $description: Type a sum ("12*7.5", "sqrt(2)") or a conversion ("5 km in mi", "72 f to c"). Enter copies the result
 - killProcess: true
   $name: Kill process
-  $description: Type "kill" and part of a process name. Enter ends the selected process at once, without asking it to save
+  $description: Type "kill" and at least two letters of a process name. Enter ends the selected process at once, without asking it to save
 - commands:
   - - keyword: g
       $name: Keyword
@@ -221,7 +231,7 @@ Library to client:
       $description: Put {query} where the text typed after the keyword should go
     - args: ""
       $name: Arguments
-      $description: Optional, for programs. Can contain {query} too
+      $description: Optional, for programs. {query} is passed as typed, so wrap it in quotes to keep several words together. Inside a URL it's encoded
   - - keyword: yt
     - title: Search YouTube for {query}
     - command: https://www.youtube.com/results?search_query={query}
