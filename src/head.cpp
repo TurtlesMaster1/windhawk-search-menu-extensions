@@ -2,7 +2,7 @@
 // @id              search-menu-extensions
 // @name            New Windows Search Extensions
 // @description     For the NEW Windows 11 Insider search box (composer search, build 26320+), not classic search. Adds a calculator, unit converter, "kill <process>" and custom keyword commands. Other mods, and scripts through the pipe, can add results too
-// @version         0.1.0
+// @version         0.1.1
 // @author          TurtlesMaster1
 // @github          https://github.com/TurtlesMaster1
 // @include         shellhost.exe
